@@ -1,61 +1,80 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Career Quest — AI-навигатор развития</title>
-<link rel="stylesheet" href="/assets/styles.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f5f7fb" />
+  <title>Career Quest — навигатор развития</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">🎯 Career Quest</div>
-  <nav class="tabs">
-    <button class="tab-btn active" data-tab="profile">Профиль сотрудника</button>
-    <button class="tab-btn" data-tab="hr">HR-обзор</button>
-    <button class="tab-btn" data-tab="upload">Загрузка профилей жюри</button>
+  <div class="app-shell">
+    <button class="sidebar-backdrop" id="sidebar-backdrop" type="button" aria-label="Закрыть меню" tabindex="-1"></button>
+    <aside class="app-sidebar" id="app-sidebar" aria-label="Основное меню">
+      <div class="sidebar-head">
+        <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">CQ</span><span class="brand-copy"><strong>Career Quest</strong><small>Навигатор развития</small></span></div>
+        <button class="icon-btn sidebar-close" id="sidebar-close" type="button" aria-label="Закрыть меню">×</button>
+      </div>
+      <div class="sidebar-section-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
+      <nav class="sidebar-nav" aria-label="Разделы">
+        <button class="tab-btn nav-btn active" type="button" data-tab="profile" aria-controls="tab-profile" aria-current="page"><span class="nav-icon" aria-hidden="true">◉</span><span><strong>Навигатор</strong><small>Профиль и следующий шаг</small></span><span class="nav-chevron" aria-hidden="true">›</span></button>
+        <button class="tab-btn nav-btn" type="button" data-tab="hr" aria-controls="tab-hr"><span class="nav-icon" aria-hidden="true">▦</span><span><strong>HR-аналитика</strong><small>Команда и компетенции</small></span><span class="nav-chevron" aria-hidden="true">›</span></button>
+        <button class="tab-btn nav-btn" type="button" data-tab="upload" aria-controls="tab-upload"><span class="nav-icon" aria-hidden="true">↥</span><span><strong>Загрузка данных</strong><small>Профили и история</small></span><span class="nav-chevron" aria-hidden="true">›</span></button>
+      </nav>
+      <div class="sidebar-foot"><span class="sidebar-foot-dot" aria-hidden="true"></span><span>Демо-контур · синтетические данные</span></div>
+    </aside>
+
+    <div class="workspace">
+      <header class="workspace-topbar">
+        <button class="icon-btn menu-toggle" id="menu-toggle" type="button" aria-label="Открыть меню" aria-expanded="false" aria-controls="app-sidebar">☰</button>
+        <div class="topbar-context"><span class="topbar-kicker">CAREER QUEST</span><span id="topbar-section">Навигатор</span></div>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Включить тёмную тему"><span class="theme-icon" aria-hidden="true">◐</span><span class="theme-label">Тёмная тема</span></button>
+      </header>
+
+      <main id="main-content">
+        <div class="page-intro"><div><div class="eyebrow" id="page-eyebrow">МОЯ ТРАЕКТОРИЯ</div><h1 id="page-title">Карьера в фокусе</h1><p id="page-description">Выберите сотрудника и посмотрите его следующий шаг развития.</p></div></div>
+
+        <section id="tab-profile" class="tab-panel active" aria-label="Профиль сотрудника">
+          <div class="profile-layout">
+            <div class="people-column">
+              <button class="mobile-employee-toggle" id="employee-picker-toggle" type="button" aria-expanded="false" aria-controls="employee-picker"><span><small>СОТРУДНИК</small><strong id="selected-employee-label">Выбрать сотрудника</strong></span><span aria-hidden="true">⌄</span></button>
+              <aside class="employee-list-panel" id="employee-picker" aria-label="Список сотрудников">
+                <div class="people-head"><div><span class="section-kicker">КОМАНДА</span><h2>Сотрудники</h2></div><span class="people-count" id="employee-count">0</span></div>
+                <label class="search-wrap" for="employee-search"><span aria-hidden="true">⌕</span><input id="employee-search" type="search" placeholder="Имя, ID, роль..." autocomplete="off" aria-label="Найти сотрудника" /></label>
+                <div id="employee-list" class="employee-list" aria-live="polite"></div>
+              </aside>
+            </div>
+            <div class="profile-main" id="profile-main"><div class="empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2>Выберите сотрудника</h2><p>Здесь появятся траектория, рекомендации и история развития.</p></div></div>
+          </div>
+        </section>
+
+        <section id="tab-hr" class="tab-panel" aria-label="HR-аналитика"><div id="hr-content" class="hr-content"><div class="loading">Готовим аналитику...</div></div></section>
+
+        <section id="tab-upload" class="tab-panel" aria-label="Загрузка данных">
+          <div class="upload-intro"><span class="upload-intro-icon" aria-hidden="true">↥</span><div><strong>Добавьте данные для проверки</strong><p>Загрузите профили и историю в форматах датасета. Файлы используются для расчёта рекомендаций.</p></div></div>
+          <div class="upload-content">
+            <div class="upload-card">
+              <div class="upload-card-head"><span class="upload-step">01</span><div><h2>Профили сотрудников</h2><p class="hint">JSON · структура <code>{"employees":[...]}</code> или один профиль</p></div></div>
+              <label class="upload-dropzone" id="dropzone-employees" for="file-employees"><input class="upload-file-input" type="file" id="file-employees" accept=".json" aria-label="Выбрать JSON с профилями сотрудников" aria-describedby="upload-employees-filename upload-employees-result" /><span class="upload-icon" aria-hidden="true">↥</span><span class="upload-prompt">Перетащите JSON-файл<br />или нажмите для выбора</span><span class="upload-file-name" id="upload-employees-filename">Файл не выбран</span></label>
+              <button class="btn upload-submit" type="button" id="btn-upload-employees" disabled>Загрузить профили <span aria-hidden="true">→</span></button>
+              <div id="upload-employees-result" class="result-msg" role="status" aria-live="polite" aria-atomic="true"></div>
+            </div>
+            <div class="upload-card">
+              <div class="upload-card-head"><span class="upload-step">02</span><div><h2>История активностей</h2><p class="hint">CSV · структура <code>activity_history.csv</code></p></div></div>
+              <label class="upload-dropzone" id="dropzone-activity" for="file-activity"><input class="upload-file-input" type="file" id="file-activity" accept=".csv" aria-label="Выбрать CSV с историей активностей" aria-describedby="upload-activity-filename upload-activity-result" /><span class="upload-icon" aria-hidden="true">↥</span><span class="upload-prompt">Перетащите CSV-файл<br />или нажмите для выбора</span><span class="upload-file-name" id="upload-activity-filename">Файл не выбран</span></label>
+              <button class="btn upload-submit" type="button" id="btn-upload-activity" disabled>Загрузить историю <span aria-hidden="true">→</span></button>
+              <div id="upload-activity-result" class="result-msg" role="status" aria-live="polite" aria-atomic="true"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <nav class="mobile-bottom-nav" aria-label="Разделы">
+    <button class="tab-btn bottom-btn active" type="button" data-tab="profile" aria-controls="tab-profile" aria-current="page"><span aria-hidden="true">◉</span><strong>Навигатор</strong></button>
+    <button class="tab-btn bottom-btn" type="button" data-tab="hr" aria-controls="tab-hr"><span aria-hidden="true">▦</span><strong>HR-обзор</strong></button>
+    <button class="tab-btn bottom-btn" type="button" data-tab="upload" aria-controls="tab-upload"><span aria-hidden="true">↥</span><strong>Данные</strong></button>
   </nav>
-</header>
-
-<main>
-  <section id="tab-profile" class="tab-panel active">
-    <div class="profile-layout">
-      <aside class="employee-list-panel">
-        <input id="employee-search" type="text" placeholder="Поиск: ID, имя, роль..." />
-        <div id="employee-list" class="employee-list"></div>
-      </aside>
-
-      <div class="profile-main" id="profile-main">
-        <div class="empty-state">Выберите сотрудника слева</div>
-      </div>
-    </div>
-  </section>
-
-  <section id="tab-hr" class="tab-panel">
-    <div id="hr-content" class="hr-content">
-      <div class="empty-state">Загрузка...</div>
-    </div>
-  </section>
-
-  <section id="tab-upload" class="tab-panel">
-    <div class="upload-content">
-      <div class="upload-card">
-        <h3>Проверочные профили сотрудников (JSON)</h3>
-        <p class="hint">Формат как в employees.json: <code>{"employees":[...]}</code> или массив/объект профиля.</p>
-        <input type="file" id="file-employees" accept=".json" />
-        <button id="btn-upload-employees">Загрузить</button>
-        <div id="upload-employees-result" class="result-msg"></div>
-      </div>
-      <div class="upload-card">
-        <h3>История активностей (CSV)</h3>
-        <p class="hint">Формат как activity_history.csv.</p>
-        <input type="file" id="file-activity" accept=".csv" />
-        <button id="btn-upload-activity">Загрузить</button>
-        <div id="upload-activity-result" class="result-msg"></div>
-      </div>
-    </div>
-  </section>
-</main>
-
-<script src="/assets/app.js"></script>
+  <script src="/assets/app.js"></script>
 </body>
 </html>

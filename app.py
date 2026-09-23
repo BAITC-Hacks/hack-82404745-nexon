@@ -184,6 +184,7 @@ async def build_profile(employee_id: str) -> EmployeeProfileOut:
             grade=t.grade,
             readiness_pct=t.readiness_pct,
             skills=_skill_levels_for_trajectory(levels, t),
+            promotion_estimate=PromotionEstimateOut(**estimate_time_to_promotion(store, employee, t).__dict__),
         )
         for t in trajectories
     ]

@@ -6,6 +6,43 @@ let showAILogic = false;
 let profileRequestId = 0;
 let profileChat = null;
 let hrChat = null;
+let viewerRole = "hr";
+let viewerEmployeeId = null;
+let viewerGeneration = 0;
+const viewerRequests = new Set();
+const ACCESS_DENIED = "Доступ только к своим данным";
+
+function accessDeniedError() {
+  const error = new Error(ACCESS_DENIED);
+  error.status = 403;
+  return error;
+}
+
+async function apiFetch(path, options = {}) {
+  if (viewerRole === "employee" && !viewerEmployeeId) throw accessDeniedError();
+  const generation = viewerGeneration;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener("abort", abort, { once: true });
+  const request = { ...options, signal: controller.signal };
+  if (viewerRole === "employee") {
+    const headers = new Headers(options.headers);
+    headers.set("X-Viewer-Role", "employee");
+    headers.set("X-Viewer-Employee-Id", viewerEmployeeId);
+    request.headers = headers;
+  }
+  viewerRequests.add(controller);
+  try {
+    const response = await fetch(`${API}${path}`, request);
+    if (generation !== viewerGeneration) throw new DOMException("Режим просмотра изменён", "AbortError");
+    if (response.status === 403) throw accessDeniedError();
+    return response;
+  } finally {
+    viewerRequests.delete(controller);
+    options.signal?.removeEventListener("abort", abort);
+  }
+}
 
 // ── Navigation and appearance ───────────────────────────────────────
 
@@ -23,6 +60,11 @@ function closeSidebar(restoreFocus = false) {
 
 function navigateTo(tab, pushHistory = true) {
   if (!sections[tab]) return;
+  if (viewerRole === "employee" && tab !== "profile") {
+    tab = "profile";
+    history.replaceState(null, "", "#profile");
+    flashUpdated(ACCESS_DENIED, "error");
+  }
   document.querySelectorAll(".tab-btn").forEach((button) => {
     const active = button.dataset.tab === tab;
     button.classList.toggle("active", active);
@@ -69,6 +111,82 @@ try { savedTheme = localStorage.getItem("careerQuestTheme") === "dark" ? "dark" 
 setTheme(savedTheme);
 themeButton.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 
+// ── Demo viewer role ─────────────────────────────────────────────────
+
+const viewerDialog = document.getElementById("viewer-dialog");
+const viewerSelect = document.getElementById("viewer-employee-select");
+const viewerEmployeeButton = document.getElementById("viewer-employee");
+const viewerHrButton = document.getElementById("viewer-hr");
+
+function updateViewerControls() {
+  const isEmployee = viewerRole === "employee";
+  document.body.dataset.viewerRole = viewerRole;
+  viewerEmployeeButton.disabled = !allEmployees.length;
+  viewerEmployeeButton.setAttribute("aria-pressed", String(isEmployee));
+  viewerHrButton.setAttribute("aria-pressed", String(!isEmployee));
+  document.querySelectorAll('.tab-btn[data-tab="hr"], .tab-btn[data-tab="upload"]').forEach((button) => {
+    button.hidden = isEmployee;
+  });
+  document.querySelector(".people-column").hidden = isEmployee;
+  const identity = document.getElementById("viewer-identity");
+  identity.hidden = !isEmployee;
+  if (isEmployee) {
+    const me = allEmployees.find((e) => e.employee_id === viewerEmployeeId);
+    identity.textContent = `Вы: ${me?.full_name || viewerEmployeeId} (${viewerEmployeeId}) · доступен только свой профиль`;
+  }
+  closeSidebar();
+  closeEmployeePicker();
+}
+
+function setViewerRole(role) {
+  if (role !== "hr" && role !== "employee") return;
+  if (role === viewerRole || (role === "employee" && !allEmployees.some((e) => e.employee_id === viewerEmployeeId))) return;
+  const nextEmployeeId = role === "employee" ? viewerEmployeeId : activeEmployeeId;
+  viewerGeneration += 1;
+  viewerRequests.forEach((controller) => controller.abort());
+  profileRequestId += 1;
+  profileChat?.dispose();
+  hrChat?.dispose();
+  profileChat = null;
+  hrChat = role === "hr" ? createAgentChat("hr", null) : null;
+  activeEmployeeId = null;
+  viewerRole = role;
+  hrLoaded = false;
+  document.getElementById("hr-content").replaceChildren();
+  document.getElementById("profile-main").innerHTML = `<div class="empty-state">Выберите сотрудника для просмотра профиля.</div>`;
+  updateViewerControls();
+  navigateTo("profile");
+  const selected = allEmployees.some((e) => e.employee_id === nextEmployeeId) ? nextEmployeeId : allEmployees[0]?.employee_id;
+  if (selected) selectEmployee(selected);
+}
+
+viewerEmployeeButton.addEventListener("click", () => {
+  if (viewerRole === "employee") return;
+  if (viewerEmployeeId && allEmployees.some((e) => e.employee_id === viewerEmployeeId)) {
+    setViewerRole("employee");
+    return;
+  }
+  viewerSelect.replaceChildren();
+  for (const employee of allEmployees) {
+    const option = document.createElement("option");
+    option.value = employee.employee_id;
+    option.textContent = `${employee.full_name} · ${employee.employee_id} · ${employee.role}`;
+    viewerSelect.appendChild(option);
+  }
+  viewerSelect.value = allEmployees.some((e) => e.employee_id === activeEmployeeId)
+    ? activeEmployeeId : allEmployees[0].employee_id;
+  viewerDialog.showModal();
+});
+viewerHrButton.addEventListener("click", () => setViewerRole("hr"));
+document.getElementById("viewer-cancel").addEventListener("click", () => viewerDialog.close());
+document.getElementById("viewer-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!allEmployees.some((e) => e.employee_id === viewerSelect.value)) return;
+  viewerEmployeeId = viewerSelect.value;
+  viewerDialog.close();
+  setViewerRole("employee");
+});
+
 const employeePicker = document.getElementById("employee-picker");
 const employeePickerButton = document.getElementById("employee-picker-toggle");
 function closeEmployeePicker() {
@@ -83,10 +201,15 @@ employeePickerButton.addEventListener("click", () => {
 // ── Employee list ────────────────────────────────────────────────────
 
 async function loadEmployees() {
-  const res = await fetch(`${API}/api/employees`);
+  if (viewerRole !== "hr") return;
+  const generation = viewerGeneration;
+  const res = await apiFetch("/api/employees");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  allEmployees = await res.json();
+  const employees = await res.json();
+  if (generation !== viewerGeneration) return;
+  allEmployees = employees;
   document.getElementById("employee-count").textContent = allEmployees.length;
+  updateViewerControls();
   renderEmployeeList(filterEmployees());
   if (!activeEmployeeId && allEmployees.length) selectEmployee(allEmployees[0].employee_id);
 }
@@ -94,6 +217,7 @@ async function loadEmployees() {
 function renderEmployeeList(list) {
   const container = document.getElementById("employee-list");
   container.innerHTML = "";
+  if (viewerRole === "employee") return;
   if (!list.length) {
     container.innerHTML = `<div class="people-empty">Сотрудники не найдены</div>`;
     return;
@@ -124,6 +248,10 @@ document.getElementById("employee-search").addEventListener("input", () => rende
 // ── Profile ──────────────────────────────────────────────────────────
 
 async function selectEmployee(employeeId) {
+  if (viewerRole === "employee" && employeeId !== viewerEmployeeId) {
+    flashUpdated(ACCESS_DENIED, "error");
+    return;
+  }
   const requestId = ++profileRequestId;
   if (activeEmployeeId !== employeeId || !profileChat) {
     profileChat?.dispose();
@@ -144,14 +272,16 @@ async function selectEmployee(employeeId) {
       <span class="loading-caption">Считаем траекторию и рекомендации...</span>
     </div>`;
   try {
-    const res = await fetch(`${API}/api/employees/${employeeId}`);
+    const res = await apiFetch(`/api/employees/${employeeId}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const profile = await res.json();
     if (requestId !== profileRequestId) return;
+    if (viewerRole === "employee" && profile.employee_id !== viewerEmployeeId) throw accessDeniedError();
     renderProfile(profile);
   } catch (err) {
     if (requestId !== profileRequestId) return;
-    main.innerHTML = `<div class="empty-state">Ошибка загрузки профиля: ${escapeHtml(String(err))}</div>`;
+    const message = err.status === 403 ? ACCESS_DENIED : `Ошибка загрузки профиля: ${err.message || String(err)}`;
+    main.innerHTML = `<div class="empty-state" role="alert">${escapeHtml(message)}</div>`;
   }
 }
 
@@ -338,6 +468,7 @@ function renderPromotionEstimate(estimate) {
 async function completeActivity(employeeId, eventId, buttonEl) {
   if (!buttonEl || buttonEl.disabled) return;
   const requestId = profileRequestId;
+  const generation = viewerGeneration;
   const card = buttonEl.closest(".rec-card");
   buttonEl.disabled = true;
   buttonEl.classList.add("complete-flash");
@@ -347,14 +478,14 @@ async function completeActivity(employeeId, eventId, buttonEl) {
   buttonEl.textContent = "Обновляем...";
   card?.classList.add("rec-card-completing");
   try {
-    const res = await fetch(`${API}/api/employees/${employeeId}/complete`, {
+    const res = await apiFetch(`/api/employees/${employeeId}/complete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ event_id: eventId }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const profile = await res.json();
-    if (requestId !== profileRequestId || activeEmployeeId !== employeeId) return;
+    if (requestId !== profileRequestId || generation !== viewerGeneration || activeEmployeeId !== employeeId) return;
     const disappears = !profile.recommendations.some((r) => r.event_id === eventId);
     if (disappears && card?.isConnected && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       card.classList.remove("rec-card-completing", "rec-card-enter");
@@ -363,11 +494,11 @@ async function completeActivity(employeeId, eventId, buttonEl) {
       card.classList.add("rec-card-leaving");
       await new Promise((resolve) => setTimeout(resolve, 260));
     }
-    if (requestId !== profileRequestId || activeEmployeeId !== employeeId) return;
+    if (requestId !== profileRequestId || generation !== viewerGeneration || activeEmployeeId !== employeeId) return;
     renderProfile(profile);
     flashUpdated();
   } catch (err) {
-    if (requestId !== profileRequestId || activeEmployeeId !== employeeId) return;
+    if (requestId !== profileRequestId || generation !== viewerGeneration || activeEmployeeId !== employeeId) return;
     card?.classList.remove("rec-card-completing", "rec-card-leaving");
     buttonEl.textContent = "✓ Завершить активность";
     buttonEl.disabled = false;
@@ -378,7 +509,7 @@ async function completeActivity(employeeId, eventId, buttonEl) {
       errorEl.setAttribute("role", "alert");
       card.appendChild(errorEl);
     }
-    if (errorEl) errorEl.textContent = "Не удалось обновить прогресс. Попробуйте ещё раз.";
+    if (errorEl) errorEl.textContent = err.status === 403 ? ACCESS_DENIED : "Не удалось обновить прогресс. Попробуйте ещё раз.";
   }
 }
 
@@ -387,16 +518,21 @@ async function completeActivity(employeeId, eventId, buttonEl) {
 let hrLoaded = false;
 
 async function loadHR() {
+  if (viewerRole !== "hr") return;
   if (hrLoaded) return;
+  const generation = viewerGeneration;
   hrLoaded = true;
   const container = document.getElementById("hr-content");
   container.innerHTML = `<div class="loading">Считаем срез по компании...</div>`;
   try {
-    const res = await fetch(`${API}/api/hr/overview`);
+    const res = await apiFetch("/api/hr/overview");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    if (generation !== viewerGeneration) return;
     renderHR(data);
   } catch (err) {
-    container.innerHTML = `<div class="empty-state">Ошибка: ${escapeHtml(String(err))}</div>`;
+    if (generation !== viewerGeneration) return;
+    container.innerHTML = `<div class="empty-state" role="alert">${escapeHtml(err.status === 403 ? ACCESS_DENIED : `Ошибка: ${err.message || String(err)}`)}</div>`;
     hrLoaded = false;
   }
 }
@@ -652,7 +788,7 @@ function createAgentChat(mode, employeeId, employeeName = "") {
     }, 180000);
 
     try {
-      const res = await fetch(`${API}/api/agent/chat`, {
+      const res = await apiFetch("/api/agent/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages, employee_id: employeeId }),
@@ -670,7 +806,8 @@ function createAgentChat(mode, employeeId, employeeName = "") {
       if (disposed) return;
       failedTurn = turn;
       input.value = content;
-      error.textContent = `${timedOut ? "Ассистент не ответил вовремя." : err instanceof TypeError ? "Не удалось связаться с ассистентом. Проверьте соединение." : err.message || "Не удалось получить ответ."} Повторите отправку или измените вопрос.`;
+      error.textContent = err.status === 403 ? ACCESS_DENIED
+        : `${timedOut ? "Ассистент не ответил вовремя." : err instanceof TypeError ? "Не удалось связаться с ассистентом. Проверьте соединение." : err.message || "Не удалось получить ответ."} Повторите отправку или измените вопрос.`;
       error.hidden = false;
     } finally {
       clearTimeout(timeout);
@@ -825,6 +962,7 @@ function setupUpload(kind, extension, successMessage) {
 
   button.addEventListener("click", async () => {
     if (!selectedFile || uploading) return;
+    const generation = viewerGeneration;
     uploading = true;
     button.disabled = true;
     input.disabled = true;
@@ -837,8 +975,9 @@ function setupUpload(kind, extension, successMessage) {
     const formData = new FormData();
     formData.append("file", selectedFile);
     try {
-      const res = await fetch(`${API}/api/data/${kind}`, { method: "POST", body: formData });
+      const res = await apiFetch(`/api/data/${kind}`, { method: "POST", body: formData });
       const data = await res.json().catch(() => null);
+      if (generation !== viewerGeneration) return;
       if (!res.ok) {
         const detail = typeof data?.detail === "string" ? data.detail : `Ошибка загрузки (HTTP ${res.status}).`;
         throw new Error(detail);
@@ -860,8 +999,9 @@ function setupUpload(kind, extension, successMessage) {
         }
       }
     } catch (err) {
+      if (generation !== viewerGeneration) return;
       resultEl.className = "result-msg err";
-      resultEl.textContent = err instanceof Error ? err.message : String(err);
+      resultEl.textContent = err.status === 403 ? ACCESS_DENIED : err instanceof Error ? err.message : String(err);
     } finally {
       uploading = false;
       input.disabled = false;
@@ -875,7 +1015,7 @@ function setupUpload(kind, extension, successMessage) {
 
 // ── Toast ────────────────────────────────────────────────────────────
 
-function flashUpdated(message = "✓ Прогресс обновлён") {
+function flashUpdated(message = "✓ Прогресс обновлён", tone = "success") {
   let toast = document.getElementById("update-toast");
   if (!toast) {
     toast = document.createElement("div");
@@ -884,6 +1024,8 @@ function flashUpdated(message = "✓ Прогресс обновлён") {
     document.body.appendChild(toast);
   }
   toast.textContent = message;
+  toast.classList.toggle("is-error", tone === "error");
+  toast.setAttribute("role", tone === "error" ? "alert" : "status");
   toast.classList.add("visible");
   clearTimeout(toast._hideTimer);
   toast._hideTimer = setTimeout(() => toast.classList.remove("visible"), 2200);
@@ -900,8 +1042,10 @@ function escapeHtml(str) {
 // ── Init ─────────────────────────────────────────────────────────────
 
 hrChat = createAgentChat("hr", null);
+updateViewerControls();
 navigateTo(location.hash.slice(1) in sections ? location.hash.slice(1) : "profile", false);
 loadEmployees().catch((err) => {
+  if (viewerRole !== "hr") return;
   const list = document.getElementById("employee-list");
-  list.innerHTML = `<div class="people-empty" role="alert">Не удалось загрузить список сотрудников: ${escapeHtml(err.message || String(err))}</div>`;
+  list.innerHTML = `<div class="people-empty" role="alert">${escapeHtml(err.status === 403 ? ACCESS_DENIED : `Не удалось загрузить список сотрудников: ${err.message || String(err)}`)}</div>`;
 });

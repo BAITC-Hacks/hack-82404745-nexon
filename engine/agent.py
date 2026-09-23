@@ -12,12 +12,14 @@ conversation itself is free-form.
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 from loguru import logger
 
 from .agent_tools import TOOL_SCHEMAS, execute_tool
 from .data_store import DataStore
+from .llm_explainer import LANGUAGE_NAMES
 from .models import Employee
 from .recommender import (
     Recommendation,
@@ -40,6 +42,17 @@ SYSTEM_PROMPT_BASE = (
     "честно скажи об этом, не выдумывай замену.\n"
     "Не используй markdown-разметку."
 )
+
+
+def _strip_markdown(text: str) -> str:
+    """The chat UI renders plain text, but the model occasionally ignores the
+    'no markdown' instruction (more often in English than Russian). Strip the
+    common tokens rather than showing literal asterisks/hashes to the user."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)", r"\1", text)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]*[-*]\s+", "• ", text, flags=re.MULTILINE)
+    return text
 
 
 def _catalog_block(store: DataStore) -> str:
@@ -138,10 +151,13 @@ class CareerAgent:
             primary = pick_primary_trajectory(trajectories)
             recs = recommend(store, employee, levels, primary) if primary else []
             context = _employee_context_block(store, employee, levels, primary, recs)
+            language = LANGUAGE_NAMES.get(employee.preferred_language, "русском")
         else:
             context = _hr_context_block(store)
+            language = "русском"
 
-        system_content = SYSTEM_PROMPT_BASE + "\n\n" + context + "\n\n" + _catalog_block(store)
+        language_instruction = f"Отвечай на {language} языке, независимо от того, на каком языке задан вопрос."
+        system_content = SYSTEM_PROMPT_BASE + "\n" + language_instruction + "\n\n" + context + "\n\n" + _catalog_block(store)
         messages = [{"role": "system", "content": system_content}] + history
         tool_trace: list[dict] = []
 
@@ -152,7 +168,7 @@ class CareerAgent:
                 tool_calls = message.get("tool_calls")
 
                 if not tool_calls:
-                    reply = (message.get("content") or "").strip()
+                    reply = _strip_markdown((message.get("content") or "").strip())
                     return {"reply": reply or "Не удалось сформировать ответ.", "tool_trace": tool_trace}
 
                 messages.append(message)

@@ -28,11 +28,19 @@
       <header class="workspace-topbar">
         <button class="icon-btn menu-toggle" id="menu-toggle" type="button" aria-label="Открыть меню" aria-expanded="false" aria-controls="app-sidebar">☰</button>
         <div class="topbar-context"><span class="topbar-kicker">CAREER QUEST</span><span id="topbar-section">Навигатор</span></div>
-        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Включить тёмную тему"><span class="theme-icon" aria-hidden="true">◐</span><span class="theme-label">Тёмная тема</span></button>
+        <div class="topbar-actions">
+          <div class="viewer-role-switch" role="group" aria-label="Я: режим просмотра">
+            <span class="viewer-role-label" aria-hidden="true">Я:</span>
+            <button id="viewer-employee" type="button" aria-pressed="false" disabled>Сотрудник</button>
+            <button id="viewer-hr" type="button" aria-pressed="true">HR</button>
+          </div>
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Включить тёмную тему"><span class="theme-icon" aria-hidden="true">◐</span><span class="theme-label">Тёмная тема</span></button>
+        </div>
       </header>
 
       <main id="main-content">
         <div class="page-intro"><div><div class="eyebrow" id="page-eyebrow">МОЯ ТРАЕКТОРИЯ</div><h1 id="page-title">Карьера в фокусе</h1><p id="page-description">Выберите сотрудника и посмотрите его следующий шаг развития.</p></div></div>
+        <div class="viewer-identity" id="viewer-identity" hidden></div>
 
         <section id="tab-profile" class="tab-panel active" aria-label="Профиль сотрудника">
           <div class="profile-layout">
@@ -73,6 +81,19 @@
     </div>
   </div>
   <div id="agent-chat-dock" class="agent-chat-dock" hidden></div>
+  <dialog class="viewer-dialog" id="viewer-dialog" aria-labelledby="viewer-dialog-title" aria-describedby="viewer-dialog-description">
+    <form id="viewer-form">
+      <span class="section-kicker">РЕЖИМ СОТРУДНИКА</span>
+      <h2 id="viewer-dialog-title">Кто вы?</h2>
+      <p id="viewer-dialog-description">Выберите свой профиль для демонстрации доступа. Это не вход в систему.</p>
+      <label for="viewer-employee-select">Мой профиль</label>
+      <select id="viewer-employee-select" required></select>
+      <div class="viewer-dialog-actions">
+        <button class="btn btn-outline" id="viewer-cancel" type="button">Отмена</button>
+        <button class="btn" type="submit">Открыть мой профиль</button>
+      </div>
+    </form>
+  </dialog>
   <nav class="mobile-bottom-nav" aria-label="Разделы">
     <button class="tab-btn bottom-btn active" type="button" data-tab="profile" aria-controls="tab-profile" aria-current="page"><span aria-hidden="true">◉</span><strong>Навигатор</strong></button>
     <button class="tab-btn bottom-btn" type="button" data-tab="hr" aria-controls="tab-hr"><span aria-hidden="true">▦</span><strong>HR-обзор</strong></button>

@@ -4,6 +4,8 @@ let allEmployees = [];
 let activeEmployeeId = null;
 let showAILogic = false;
 let profileRequestId = 0;
+let profileChat = null;
+let hrChat = null;
 
 // ── Navigation and appearance ───────────────────────────────────────
 
@@ -35,6 +37,7 @@ function navigateTo(tab, pushHistory = true) {
   if (pushHistory && location.hash !== `#${tab}`) history.pushState(null, "", `#${tab}`);
   closeSidebar();
   if (tab === "hr") loadHR();
+  syncAgentChatDock(tab);
   window.scrollTo({ top: 0, behavior: "auto" });
 }
 
@@ -65,7 +68,6 @@ let savedTheme = "light";
 try { savedTheme = localStorage.getItem("careerQuestTheme") === "dark" ? "dark" : "light"; } catch { /* use light */ }
 setTheme(savedTheme);
 themeButton.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
-navigateTo(location.hash.slice(1) in sections ? location.hash.slice(1) : "profile", false);
 
 const employeePicker = document.getElementById("employee-picker");
 const employeePickerButton = document.getElementById("employee-picker-toggle");
@@ -123,7 +125,13 @@ document.getElementById("employee-search").addEventListener("input", () => rende
 
 async function selectEmployee(employeeId) {
   const requestId = ++profileRequestId;
+  if (activeEmployeeId !== employeeId || !profileChat) {
+    profileChat?.dispose();
+    const employeeName = allEmployees.find((e) => e.employee_id === employeeId)?.full_name || employeeId;
+    profileChat = createAgentChat("profile", employeeId, employeeName);
+  }
   activeEmployeeId = employeeId;
+  if (document.getElementById("tab-profile").classList.contains("active")) syncAgentChatDock("profile");
   document.getElementById("selected-employee-label").textContent = allEmployees.find((e) => e.employee_id === employeeId)?.full_name || employeeId;
   renderEmployeeList(filterEmployees());
   closeEmployeePicker();
@@ -270,6 +278,7 @@ function renderProfile(p) {
     recCard.appendChild(card);
   }
   main.appendChild(recCard);
+  if (document.getElementById("tab-profile").classList.contains("active")) syncAgentChatDock("profile");
 
   const histCard = document.createElement("div");
   histCard.className = "card profile-card-enter";
@@ -503,6 +512,229 @@ function renderHR(d) {
   container.appendChild(partCard);
 }
 
+// ── AI career agent ──────────────────────────────────────────────────
+
+function createAgentChat(mode, employeeId, employeeName = "") {
+  const isHR = mode === "hr";
+  const prefix = `agent-${mode}`;
+  const context = isHR ? "HR-режим · вся компания" : `Для сотрудника: ${employeeName}`;
+  // Only user/assistant text goes back to the API; tool traces stay in the UI.
+  const messages = [];
+  let pending = false;
+  let disposed = false;
+  let controller = null;
+  let failedTurn = null;
+
+  const element = document.createElement("section");
+  element.id = `${prefix}-chat`;
+  element.className = "card agent-chat";
+  element.setAttribute("aria-labelledby", `${prefix}-title`);
+  element.innerHTML = `
+    <button class="agent-chat-toggle" type="button" aria-expanded="false" aria-controls="${prefix}-body">
+      <span class="agent-chat-icon" aria-hidden="true">AI</span>
+      <span class="agent-chat-heading"><span id="${prefix}-title" class="agent-chat-title">Спросить AI-ассистента</span><span class="agent-chat-context"></span></span>
+      <span class="agent-chat-chevron" aria-hidden="true">⌄</span>
+    </button>
+    <div class="agent-chat-body" id="${prefix}-body" hidden>
+      <div class="agent-chat-log" role="log" aria-label="${isHR ? "Диалог с HR-ассистентом" : "Диалог с карьерным ассистентом"}" aria-live="polite" aria-relevant="additions text" tabindex="0">
+        <p class="agent-chat-empty">${isHR ? "Обсудите развитие команды: найдите менторов или оцените эффект обучения для отдела." : "Обсудите разрывы в навыках, рекомендации и поиск ментора для следующего карьерного шага."}</p>
+      </div>
+      <div class="agent-chat-typing" role="status" hidden><span class="agent-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Ассистент готовит ответ…</span></div>
+      <div class="agent-chat-error" role="alert" hidden></div>
+      <form class="agent-chat-form">
+        <label class="sr-only" for="${prefix}-input">${isHR ? "Вопрос HR-ассистенту" : "Вопрос карьерному ассистенту"}</label>
+        <div class="agent-chat-compose">
+          <textarea id="${prefix}-input" class="agent-chat-input" rows="2" placeholder="Задайте вопрос…" aria-describedby="${prefix}-hint" enterkeyhint="send"></textarea>
+          <button class="btn agent-chat-send" type="submit" disabled>Отправить <span aria-hidden="true">↑</span></button>
+        </div>
+        <p class="agent-chat-hint" id="${prefix}-hint">Enter — отправить · Shift+Enter — новая строка</p>
+      </form>
+      ${isHR ? `<div class="agent-chat-examples"><span>Попробуйте спросить</span><button class="btn btn-outline agent-chat-example" type="button">Что если назначить System Design Fundamentals всему Backend-отделу?</button><button class="btn btn-outline agent-chat-example" type="button">Кто может быть ментором по SQL в Data &amp; Analytics?</button></div>` : ""}
+    </div>
+  `;
+
+  const toggle = element.querySelector(".agent-chat-toggle");
+  const body = element.querySelector(".agent-chat-body");
+  const contextLabel = element.querySelector(".agent-chat-context");
+  const log = element.querySelector(".agent-chat-log");
+  const empty = element.querySelector(".agent-chat-empty");
+  const typing = element.querySelector(".agent-chat-typing");
+  const error = element.querySelector(".agent-chat-error");
+  const form = element.querySelector(".agent-chat-form");
+  const input = element.querySelector(".agent-chat-input");
+  const send = element.querySelector(".agent-chat-send");
+  const examples = element.querySelectorAll(".agent-chat-example");
+  contextLabel.textContent = context;
+
+  function scrollToLatest() {
+    requestAnimationFrame(() => {
+      if (!disposed && !body.hidden) log.scrollTop = log.scrollHeight;
+    });
+  }
+
+  function updateControls() {
+    input.readOnly = pending;
+    send.disabled = pending || !input.value.trim();
+    send.textContent = pending ? "Ждём ответ…" : failedTurn ? "Повторить" : "Отправить ↑";
+    typing.hidden = !pending;
+    form.setAttribute("aria-busy", String(pending));
+    contextLabel.textContent = pending ? "Ассистент готовит ответ…" : context;
+    examples.forEach((button) => { button.disabled = pending; });
+  }
+
+  function appendMessage(role, content, trace = []) {
+    empty.remove();
+    const message = document.createElement("div");
+    message.className = `agent-message agent-message-${role}`;
+    const author = document.createElement("span");
+    author.className = "agent-message-author";
+    author.textContent = role === "user" ? "Вы" : "AI-ассистент";
+    const text = document.createElement("div");
+    text.className = "agent-message-text";
+    // Treat model replies and tool data as text, never as executable markup.
+    text.textContent = content;
+    message.append(author, text);
+    if (trace.length) message.appendChild(renderAgentToolTrace(trace));
+    log.appendChild(message);
+    scrollToLatest();
+    return text;
+  }
+
+  toggle.addEventListener("click", () => {
+    const open = body.hidden;
+    body.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    if (open) {
+      input.focus({ preventScroll: true });
+      scrollToLatest();
+    }
+  });
+  input.addEventListener("input", updateControls);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault();
+      if (!pending) form.requestSubmit();
+    }
+  });
+  examples.forEach((button) => button.addEventListener("click", () => {
+    input.value = button.textContent;
+    updateControls();
+    input.focus({ preventScroll: true });
+  }));
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const content = input.value.trim();
+    if (!content || pending || disposed) return;
+
+    // A failed turn can be retried or edited without duplicating it in history.
+    let turn = failedTurn;
+    if (turn) {
+      turn.message.content = content;
+      turn.text.textContent = content;
+    } else {
+      const message = { role: "user", content };
+      messages.push(message);
+      turn = { message, text: appendMessage("user", content) };
+    }
+    failedTurn = null;
+    pending = true;
+    input.value = "";
+    error.hidden = true;
+    error.textContent = "";
+    updateControls();
+    scrollToLatest();
+    controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 180000);
+
+    try {
+      const res = await fetch(`${API}/api/agent/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages, employee_id: employeeId }),
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => null);
+      if (disposed) return;
+      if (!res.ok) throw new Error(`Ассистент сейчас недоступен (HTTP ${res.status}).`);
+      if (typeof data?.reply !== "string" || !data.reply.trim()) {
+        throw new Error("Не удалось прочитать ответ ассистента.");
+      }
+      messages.push({ role: "assistant", content: data.reply });
+      appendMessage("assistant", data.reply, Array.isArray(data.tool_trace) ? data.tool_trace : []);
+    } catch (err) {
+      if (disposed) return;
+      failedTurn = turn;
+      input.value = content;
+      error.textContent = `${timedOut ? "Ассистент не ответил вовремя." : err instanceof TypeError ? "Не удалось связаться с ассистентом. Проверьте соединение." : err.message || "Не удалось получить ответ."} Повторите отправку или измените вопрос.`;
+      error.hidden = false;
+    } finally {
+      clearTimeout(timeout);
+      controller = null;
+      if (!disposed) {
+        pending = false;
+        updateControls();
+      }
+    }
+  });
+
+  return {
+    element,
+    employeeId,
+    dispose() {
+      disposed = true;
+      controller?.abort();
+      messages.length = 0;
+      element.remove();
+    },
+  };
+}
+
+function renderAgentToolTrace(trace) {
+  const details = document.createElement("details");
+  details.className = "agent-tool-trace";
+  const summary = document.createElement("summary");
+  summary.textContent = `🔧 Использованы инструменты: ${trace.map((call) => `${call.tool}(…)`).join(", ")}`;
+  details.appendChild(summary);
+  for (const call of trace) {
+    const item = document.createElement("div");
+    item.className = "agent-tool-call";
+    const name = document.createElement("strong");
+    name.textContent = call.tool;
+    item.appendChild(name);
+    for (const [label, value] of [["Аргументы", call.arguments], ["Результат", call.result]]) {
+      const caption = document.createElement("span");
+      caption.className = "agent-tool-caption";
+      caption.textContent = label;
+      const data = document.createElement("pre");
+      data.className = "agent-tool-data";
+      data.textContent = JSON.stringify(value ?? {}, null, 2);
+      item.append(caption, data);
+    }
+    details.appendChild(item);
+  }
+  return details;
+}
+
+function syncAgentChatDock(tab) {
+  const dock = document.getElementById("agent-chat-dock");
+  if (!dock) return;
+  const chat = tab === "profile" ? profileChat : tab === "hr" ? hrChat : null;
+  [profileChat, hrChat].filter(Boolean).forEach((item) => {
+    if (item.element.parentElement !== dock) dock.appendChild(item.element);
+    item.element.hidden = item !== chat;
+  });
+  if (!chat) {
+    dock.hidden = true;
+    return;
+  }
+  dock.hidden = false;
+}
+
 // ── Upload ───────────────────────────────────────────────────────────
 
 setupUpload("employees", ".json", (data) =>
@@ -667,6 +899,8 @@ function escapeHtml(str) {
 
 // ── Init ─────────────────────────────────────────────────────────────
 
+hrChat = createAgentChat("hr", null);
+navigateTo(location.hash.slice(1) in sections ? location.hash.slice(1) : "profile", false);
 loadEmployees().catch((err) => {
   const list = document.getElementById("employee-list");
   list.innerHTML = `<div class="people-empty" role="alert">Не удалось загрузить список сотрудников: ${escapeHtml(err.message || String(err))}</div>`;

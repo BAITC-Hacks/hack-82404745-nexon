@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover - fallback if loguru not installed
     )
     logger = logging.getLogger("app")
 
+from engine.agent import CareerAgent
 from engine.data_store import AS_OF_DATE, store
 from engine.llm_explainer import Explainer
 from engine.models import ActivityRecord, Employee
@@ -51,10 +52,14 @@ from engine.recommender import (
     build_trajectories,
     effective_skills,
     estimate_time_to_promotion,
+    pick_primary_trajectory,
     recommend,
 )
 from engine.schemas import (
     ActivityHistoryItem,
+    AgentChatRequest,
+    AgentChatResponse,
+    AgentToolCall,
     CompleteActivityRequest,
     EmployeeBrief,
     EmployeeProfileOut,
@@ -110,6 +115,7 @@ START_TIME = time.time()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 explainer = Explainer(url=LLM_URL, api_key=LLM_API_KEY, model=LLM_MODEL, timeout=LLM_TIMEOUT_SECONDS)
+career_agent = CareerAgent(url=LLM_URL, api_key=LLM_API_KEY, model=LLM_MODEL, timeout=max(LLM_TIMEOUT_SECONDS, 20.0))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -135,14 +141,7 @@ def _skill_levels_for_trajectory(levels: dict[str, int], target: TrajectoryTarge
     return out
 
 
-def _pick_primary_trajectory(trajectories: list[TrajectoryTarget]) -> TrajectoryTarget | None:
-    for t in trajectories:
-        if t.label == "career_goal":
-            return t
-    for t in trajectories:
-        if t.label == "next_grade":
-            return t
-    return None
+_pick_primary_trajectory = pick_primary_trajectory
 
 
 def _recommendation_to_out(rec: Recommendation, explanation: str) -> RecommendationOut:
@@ -448,6 +447,19 @@ async def upload_activity(file: UploadFile = File(...)) -> UploadActivityResult:
     return UploadActivityResult(merged_records=merged, total_records=len(store.activity))
 
 
+@app.post("/api/agent/chat", response_model=AgentChatResponse)
+async def agent_chat(req: AgentChatRequest) -> AgentChatResponse:
+    if req.employee_id and not store.get_employee(req.employee_id):
+        raise HTTPException(status_code=404, detail=f"employee '{req.employee_id}' not found")
+
+    history = [{"role": m.role, "content": m.content} for m in req.messages]
+    result = await career_agent.chat(store, history, employee_id=req.employee_id)
+    return AgentChatResponse(
+        reply=result["reply"],
+        tool_trace=[AgentToolCall(**t) for t in result["tool_trace"]],
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Static frontend
 # ──────────────────────────────────────────────────────────────────────────
@@ -579,6 +591,7 @@ async def main() -> None:
         await asyncio.gather(*tasks)
     finally:
         await explainer.aclose()
+        await career_agent.aclose()
 
 
 if __name__ == "__main__":

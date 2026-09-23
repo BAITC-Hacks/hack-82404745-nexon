@@ -143,6 +143,17 @@ def build_trajectories(store: DataStore, employee: Employee, levels: dict[str, i
     return trajectories
 
 
+def pick_primary_trajectory(trajectories: list[TrajectoryTarget]) -> TrajectoryTarget | None:
+    """Career goal wins over the default next-grade path when both are set."""
+    for t in trajectories:
+        if t.label == "career_goal":
+            return t
+    for t in trajectories:
+        if t.label == "next_grade":
+            return t
+    return None
+
+
 def _format_signals(store: DataStore, employee: Employee) -> dict[str, SkillFormatSignal]:
     """Per-format participation pattern: how often this employee skips/drops that format."""
     signals: dict[str, SkillFormatSignal] = {}

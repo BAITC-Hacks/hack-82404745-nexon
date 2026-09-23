@@ -133,6 +133,27 @@ class HROverviewOut(BaseModel):
     event_participation: list[HREventParticipation]
 
 
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class AgentChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    employee_id: Optional[str] = None  # omitted/None = HR context
+
+
+class AgentToolCall(BaseModel):
+    tool: str
+    arguments: dict[str, Any]
+    result: dict[str, Any]
+
+
+class AgentChatResponse(BaseModel):
+    reply: str
+    tool_trace: list[AgentToolCall]
+
+
 class UploadEmployeesResult(BaseModel):
     merged_employees: int
     total_employees: int

@@ -1,32 +1,33 @@
 """
-HackAlemAI 2026 — Backend-centric AI Agent MVP.
-FastAPI (REST) + aiogram 3.x (Telegram UI) на одном event loop.
+Career Quest — AI-навигатор развития сотрудника (HackAlem AI, Halyk Bank track).
+FastAPI backend + static web frontend + optional Telegram bot (bonus).
 Запуск: python app.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import time
-import uuid
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from datetime import date
+from pathlib import Path
 
-import httpx
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 try:
@@ -40,6 +41,37 @@ except ImportError:  # pragma: no cover - fallback if loguru not installed
     )
     logger = logging.getLogger("app")
 
+from engine.data_store import AS_OF_DATE, store
+from engine.llm_explainer import Explainer
+from engine.models import ActivityRecord, Employee
+from engine.recommender import (
+    NEGATIVE_STATUSES,
+    Recommendation,
+    TrajectoryTarget,
+    build_trajectories,
+    effective_skills,
+    estimate_time_to_promotion,
+    recommend,
+)
+from engine.schemas import (
+    ActivityHistoryItem,
+    CompleteActivityRequest,
+    EmployeeBrief,
+    EmployeeProfileOut,
+    HRDepartmentGap,
+    HRDepartmentGapCell,
+    HREmployeeFlag,
+    HREventParticipation,
+    HROverviewOut,
+    HRSkillGap,
+    PromotionEstimateOut,
+    RecommendationFactorOut,
+    RecommendationOut,
+    SkillLevel,
+    TrajectoryOut,
+    UploadActivityResult,
+    UploadEmployeesResult,
+)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Config
@@ -72,273 +104,378 @@ else:
 
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
-LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "8"))
 
 START_TIME = time.time()
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+explainer = Explainer(url=LLM_URL, api_key=LLM_API_KEY, model=LLM_MODEL, timeout=LLM_TIMEOUT_SECONDS)
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Pydantic models — Structured Outputs / Tool Calling contract
+# Profile / recommendation assembly (shared by API and Telegram bot)
 # ──────────────────────────────────────────────────────────────────────────
 
-class ActionTool(BaseModel):
-    action_name: str
-    parameters: dict[str, Any] = Field(default_factory=dict)
+def _skill_levels_for_trajectory(levels: dict[str, int], target: TrajectoryTarget) -> list[SkillLevel]:
+    out = []
+    for skill_id, required in sorted(target.profile.required_skills.items()):
+        skill = store.skills.get(skill_id)
+        current = levels.get(skill_id, 0)
+        out.append(
+            SkillLevel(
+                skill_id=skill_id,
+                name=skill.name if skill else skill_id,
+                type=skill.type if skill else "hard",
+                current_level=current,
+                required_level=required,
+                gap=max(0, required - current),
+                critical=skill_id in target.profile.critical_skills,
+            )
+        )
+    return out
 
 
-class AgentResponse(BaseModel):
-    reply_text: str
-    actions: list[ActionTool] = Field(default_factory=list)
+def _pick_primary_trajectory(trajectories: list[TrajectoryTarget]) -> TrajectoryTarget | None:
+    for t in trajectories:
+        if t.label == "career_goal":
+            return t
+    for t in trajectories:
+        if t.label == "next_grade":
+            return t
+    return None
 
 
-class AgentRunRequest(BaseModel):
-    user_input: str
-    context: dict[str, Any] = Field(default_factory=dict)
-    session_id: Optional[str] = None
+def _recommendation_to_out(rec: Recommendation, explanation: str) -> RecommendationOut:
+    return RecommendationOut(
+        event_id=rec.event.event_id,
+        title=rec.event.title,
+        description=rec.event.description,
+        type=rec.event.type,
+        format=rec.event.format,
+        duration_hours=rec.event.duration_hours,
+        upcoming_sessions=[s.isoformat() for s in rec.event.upcoming_sessions],
+        score=rec.score,
+        factors=[RecommendationFactorOut(kind=f.kind, detail=f.detail, payload=f.payload) for f in rec.factors],
+        explanation=explanation,
+        score_breakdown=rec.score_breakdown,
+    )
 
 
-class AgentRunResult(BaseModel):
-    session_id: str
-    reply_text: str
-    actions: list[ActionTool]
-    tool_results: dict[str, str]
-    elapsed_ms: int
+async def build_profile(employee_id: str) -> EmployeeProfileOut:
+    employee = store.get_employee(employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail=f"employee '{employee_id}' not found")
+
+    levels = effective_skills(store, employee)
+    trajectories = build_trajectories(store, employee, levels)
+    primary = _pick_primary_trajectory(trajectories)
+
+    recs: list[Recommendation] = []
+    if primary:
+        recs = recommend(store, employee, levels, primary)
+
+    explanations = await asyncio.gather(*(explainer.explain(employee, primary, r) for r in recs)) if recs else []
+    recommendations_out = [_recommendation_to_out(r, e) for r, e in zip(recs, explanations)]
+
+    trajectories_out = [
+        TrajectoryOut(
+            label=t.label,
+            role=t.role,
+            grade=t.grade,
+            readiness_pct=t.readiness_pct,
+            skills=_skill_levels_for_trajectory(levels, t),
+        )
+        for t in trajectories
+    ]
+
+    history = sorted(store.get_activity_for(employee_id), key=lambda r: r.date, reverse=True)[:15]
+    recent_activity = [
+        ActivityHistoryItem(
+            event_id=r.event_id,
+            event_title=store.events[r.event_id].title if r.event_id in store.events else r.event_id,
+            date=r.date.isoformat(),
+            status=r.status,
+            completion_pct=r.completion_pct,
+        )
+        for r in history
+    ]
+
+    return EmployeeProfileOut(
+        employee_id=employee.employee_id,
+        full_name=employee.full_name,
+        department=employee.department,
+        role=employee.role,
+        grade=employee.grade,
+        work_format=employee.work_format,
+        preferred_language=employee.preferred_language,
+        tenure_months=employee.tenure_months,
+        career_goal=(
+            {"target_role": employee.career_goal.target_role, "target_grade": employee.career_goal.target_grade}
+            if employee.career_goal
+            else None
+        ),
+        trajectories=trajectories_out,
+        recommendations=recommendations_out,
+        recent_activity=recent_activity,
+    )
 
 
-class HealthResponse(BaseModel):
-    status: str
-    uptime_seconds: float
-    active_sessions: int
-    telegram_configured: bool
-    llm_configured: bool
-    llm_provider: str
-    server_time: float
+STALLED_DAYS_THRESHOLD = 180  # ~6 months without a completed activity, while gaps remain open
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# In-memory session state
-# ──────────────────────────────────────────────────────────────────────────
+def build_hr_overview() -> HROverviewOut:
+    gap_counts: dict[str, int] = {}
+    gap_totals: dict[str, int] = {}
+    dept_gap_counts: dict[str, dict[str, int]] = {}
+    dept_employee_counts: dict[str, int] = {}
+    flags: list[HREmployeeFlag] = []
+    stalled: list[HREmployeeFlag] = []
 
-@dataclass
-class SessionContext:
-    session_id: str
-    history: list[dict[str, str]] = field(default_factory=list)
-    data: dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
+    for employee in store.employees.values():
+        dept_employee_counts[employee.department] = dept_employee_counts.get(employee.department, 0) + 1
 
-    def remember(self, role: str, content: str, max_turns: int = 20) -> None:
-        self.history.append({"role": role, "content": content})
-        if len(self.history) > max_turns:
-            self.history = self.history[-max_turns:]
-        self.updated_at = time.time()
+        levels = effective_skills(store, employee)
+        trajectories = build_trajectories(store, employee, levels)
+        primary = _pick_primary_trajectory(trajectories)
+        if not primary:
+            continue
 
+        for skill_id, gap in primary.gaps.items():
+            gap_counts[skill_id] = gap_counts.get(skill_id, 0) + 1
+            gap_totals[skill_id] = gap_totals.get(skill_id, 0) + gap
+            dept_bucket = dept_gap_counts.setdefault(employee.department, {})
+            dept_bucket[skill_id] = dept_bucket.get(skill_id, 0) + 1
 
-class SessionStore:
-    """Простое потокобезопасное (в рамках одного event loop) in-memory хранилище сессий."""
+        if not primary.gaps:
+            continue
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, SessionContext] = {}
-        self._lock = asyncio.Lock()
-
-    async def get_or_create(self, session_id: str) -> SessionContext:
-        async with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                session = SessionContext(session_id=session_id)
-                self._sessions[session_id] = session
-            return session
-
-    async def clear(self, session_id: str) -> None:
-        async with self._lock:
-            self._sessions.pop(session_id, None)
-
-    def count(self) -> int:
-        return len(self._sessions)
-
-
-session_store = SessionStore()
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Tool Execution Router
-# ──────────────────────────────────────────────────────────────────────────
-
-ToolHandler = Callable[[dict[str, Any], SessionContext], Awaitable[str]]
-
-
-class ToolRouter:
-    """Реестр инструментов, которые LLM может вызывать через AgentResponse.actions."""
-
-    def __init__(self) -> None:
-        self._tools: dict[str, ToolHandler] = {}
-
-    def register(self, name: str) -> Callable[[ToolHandler], ToolHandler]:
-        def decorator(handler: ToolHandler) -> ToolHandler:
-            self._tools[name] = handler
-            return handler
-
-        return decorator
-
-    def is_registered(self, name: str) -> bool:
-        return name in self._tools
-
-    async def execute(self, action: ActionTool, session: SessionContext) -> str:
-        handler = self._tools.get(action.action_name)
-        if handler is None:
-            logger.warning(f"Unknown tool requested: {action.action_name}")
-            return f"error: unknown tool '{action.action_name}'"
-        try:
-            return await handler(action.parameters, session)
-        except Exception as exc:  # noqa: BLE001 - hackathon MVP: никогда не роняем цепочку
-            logger.exception(f"Tool '{action.action_name}' failed")
-            return f"error: {exc}"
-
-    async def execute_all(
-        self, actions: list[ActionTool], session: SessionContext
-    ) -> dict[str, str]:
-        results: dict[str, str] = {}
-        for action in actions:
-            results[action.action_name] = await self.execute(action, session)
-        return results
-
-
-tool_router = ToolRouter()
-
-
-@tool_router.register("noop")
-async def _tool_noop(parameters: dict[str, Any], session: SessionContext) -> str:
-    return "ok"
-
-
-@tool_router.register("echo")
-async def _tool_echo(parameters: dict[str, Any], session: SessionContext) -> str:
-    return str(parameters.get("text", ""))
-
-
-@tool_router.register("remember_fact")
-async def _tool_remember_fact(parameters: dict[str, Any], session: SessionContext) -> str:
-    key = str(parameters.get("key", "fact"))
-    value = parameters.get("value", "")
-    session.data[key] = value
-    return f"saved '{key}'"
-
-
-@tool_router.register("get_session_state")
-async def _tool_get_session_state(parameters: dict[str, Any], session: SessionContext) -> str:
-    return json.dumps(session.data, ensure_ascii=False)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# LLM Engine Client
-# ──────────────────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """Ты — бэкенд AI-агент хакатон-проекта. Отвечай ТОЛЬКО валидным JSON, \
-строго соответствующим следующей схеме, без markdown-разметки и пояснений вокруг:
-{
-  "reply_text": "<человекочитаемый ответ пользователю на русском>",
-  "actions": [
-    {"action_name": "<имя инструмента>", "parameters": {"<ключ>": "<значение>"}}
-  ]
-}
-Если инструмент вызывать не нужно — верни actions: []. Никогда не оборачивай JSON в ```."""
-
-
-class LLMClient:
-    def __init__(self, url: str, api_key: str, model: str, timeout: float) -> None:
-        self._url = url
-        self._api_key = api_key
-        self._model = model
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0))
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-    async def run_agent(
-        self, user_input: str, context: dict[str, Any], history: list[dict[str, str]]
-    ) -> AgentResponse:
-        if not self._api_key:
-            logger.warning("LLM_API_KEY не задан — возвращаю заглушку-эхо")
-            return AgentResponse(
-                reply_text=f"[LLM не настроен] Вы написали: {user_input}",
-                actions=[],
+        recs = recommend(store, employee, levels, primary)
+        if not recs:
+            flags.append(
+                HREmployeeFlag(
+                    employee_id=employee.employee_id,
+                    full_name=employee.full_name,
+                    role=employee.role,
+                    grade=employee.grade,
+                    reason="есть разрывы по навыкам, но нет доступной подходящей активности",
+                )
             )
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if context:
-            messages.append(
-                {"role": "system", "content": f"Дополнительный контекст: {json.dumps(context, ensure_ascii=False)}"}
+        completed_dates = [
+            r.date for r in store.get_activity_for(employee.employee_id) if r.status == "completed"
+        ]
+        last_completed = max(completed_dates) if completed_dates else None
+        if last_completed is None:
+            stalled.append(
+                HREmployeeFlag(
+                    employee_id=employee.employee_id,
+                    full_name=employee.full_name,
+                    role=employee.role,
+                    grade=employee.grade,
+                    reason="нет ни одной завершённой активности в истории",
+                )
             )
-        messages.extend(history)
-        messages.append({"role": "user", "content": user_input})
-
-        payload = {
-            "model": self._model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-            "temperature": 0.3,
-        }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            response = await self._client.post(self._url, json=payload, headers=headers)
-            response.raise_for_status()
-        except httpx.TimeoutException:
-            logger.error("LLM request timed out")
-            return AgentResponse(reply_text="Сервис ИИ не ответил вовремя, попробуйте ещё раз.", actions=[])
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"LLM HTTP error {exc.response.status_code}: {exc.response.text[:500]}")
-            return AgentResponse(reply_text="Ошибка обращения к ИИ-сервису. Попробуйте позже.", actions=[])
-        except httpx.HTTPError as exc:
-            logger.error(f"LLM network error: {exc}")
-            return AgentResponse(reply_text="Нет связи с ИИ-сервисом. Попробуйте позже.", actions=[])
-
-        try:
-            raw = response.json()
-            content = raw["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-            return AgentResponse.model_validate(parsed)
-        except (KeyError, IndexError, json.JSONDecodeError, ValidationError) as exc:
-            logger.error(f"Failed to parse LLM structured output: {exc}")
-            return AgentResponse(
-                reply_text="Не удалось разобрать ответ ИИ. Переформулируйте запрос.",
-                actions=[],
+        elif (AS_OF_DATE - last_completed).days > STALLED_DAYS_THRESHOLD:
+            stalled.append(
+                HREmployeeFlag(
+                    employee_id=employee.employee_id,
+                    full_name=employee.full_name,
+                    role=employee.role,
+                    grade=employee.grade,
+                    reason=f"последняя завершённая активность {last_completed.isoformat()} (более {STALLED_DAYS_THRESHOLD} дней назад)",
+                )
             )
 
+    top_skill_gaps = [
+        HRSkillGap(
+            skill_id=skill_id,
+            name=store.skills[skill_id].name if skill_id in store.skills else skill_id,
+            employees_with_gap=count,
+            avg_gap=round(gap_totals[skill_id] / count, 2),
+        )
+        for skill_id, count in sorted(gap_counts.items(), key=lambda kv: -kv[1])[:8]
+    ]
+    top_skill_ids = [g.skill_id for g in top_skill_gaps]
 
-llm_client = LLMClient(url=LLM_URL, api_key=LLM_API_KEY, model=LLM_MODEL, timeout=LLM_TIMEOUT_SECONDS)
+    department_gaps = []
+    for department, emp_count in sorted(dept_employee_counts.items()):
+        dept_bucket = dept_gap_counts.get(department, {})
+        cells = [
+            HRDepartmentGapCell(
+                skill_id=skill_id,
+                name=store.skills[skill_id].name if skill_id in store.skills else skill_id,
+                employees_with_gap=dept_bucket.get(skill_id, 0),
+                ratio=round(dept_bucket.get(skill_id, 0) / emp_count, 3) if emp_count else 0.0,
+            )
+            for skill_id in top_skill_ids
+        ]
+        department_gaps.append(
+            HRDepartmentGap(department=department, employee_count=emp_count, cells=cells)
+        )
 
+    participation: dict[str, dict[str, int]] = {}
+    for record in store.activity:
+        p = participation.setdefault(record.event_id, {"completed": 0, "negative": 0, "total": 0})
+        p["total"] += 1
+        if record.status == "completed":
+            p["completed"] += 1
+        elif record.status in NEGATIVE_STATUSES:
+            p["negative"] += 1
 
-# ──────────────────────────────────────────────────────────────────────────
-# Shared agent pipeline (используется и FastAPI, и Telegram-хендлерами)
-# ──────────────────────────────────────────────────────────────────────────
+    event_participation = [
+        HREventParticipation(
+            event_id=event_id,
+            title=store.events[event_id].title if event_id in store.events else event_id,
+            completed=p["completed"],
+            negative=p["negative"],
+            total=p["total"],
+        )
+        for event_id, p in sorted(participation.items(), key=lambda kv: -kv[1]["total"])[:15]
+    ]
 
-async def process_agent_turn(session_id: str, user_input: str, context: dict[str, Any]) -> AgentRunResult:
-    started = time.perf_counter()
-    session = await session_store.get_or_create(session_id)
-
-    agent_response = await llm_client.run_agent(user_input, context, session.history)
-    tool_results = await tool_router.execute_all(agent_response.actions, session)
-
-    session.remember("user", user_input)
-    session.remember("assistant", agent_response.reply_text)
-
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    return AgentRunResult(
-        session_id=session_id,
-        reply_text=agent_response.reply_text,
-        actions=agent_response.actions,
-        tool_results=tool_results,
-        elapsed_ms=elapsed_ms,
+    return HROverviewOut(
+        total_employees=len(store.employees),
+        top_skill_gaps=top_skill_gaps,
+        employees_without_recommendation=flags[:20],
+        stalled_employees=stalled[:20],
+        department_gaps=department_gaps,
+        event_participation=event_participation,
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Markdown / formatting helpers (Telegram)
+# FastAPI app
 # ──────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Career Quest API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    store.load_base_dataset()
+    logger.info(f"LLM Provider: {LLM_PROVIDER} | Model: {LLM_MODEL} | configured: {bool(LLM_API_KEY)}")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception(f"Unhandled error on {request.method} {request.url.path}")
+    return JSONResponse(status_code=500, content={"error": "internal_server_error", "detail": str(exc)})
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {
+        "status": "ok",
+        "uptime_seconds": round(time.time() - START_TIME, 2),
+        "employees_loaded": len(store.employees),
+        "events_loaded": len(store.events),
+        "activity_records": len(store.activity),
+        "telegram_configured": bool(BOT_TOKEN),
+        "llm_configured": bool(LLM_API_KEY),
+        "llm_provider": LLM_PROVIDER,
+        "server_time": time.time(),
+    }
+
+
+@app.get("/api/employees", response_model=list[EmployeeBrief])
+async def list_employees() -> list[EmployeeBrief]:
+    return [EmployeeBrief(**e) for e in store.list_employees_brief()]
+
+
+@app.get("/api/employees/{employee_id}", response_model=EmployeeProfileOut)
+async def get_employee_profile(employee_id: str) -> EmployeeProfileOut:
+    return await build_profile(employee_id)
+
+
+@app.post("/api/employees/{employee_id}/complete", response_model=EmployeeProfileOut)
+async def complete_activity(employee_id: str, payload: CompleteActivityRequest) -> EmployeeProfileOut:
+    employee = store.get_employee(employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail=f"employee '{employee_id}' not found")
+    if payload.event_id not in store.events:
+        raise HTTPException(status_code=404, detail=f"event '{payload.event_id}' not found")
+
+    record = ActivityRecord(
+        record_id=f"R-manual-{len(store.activity) + 1}",
+        employee_id=employee_id,
+        event_id=payload.event_id,
+        date=AS_OF_DATE,
+        due_date=None,
+        status="completed",
+        completion_pct=100,
+        score=None,
+        feedback_rating=None,
+        assigned_by="self",
+    )
+    store.activity.append(record)
+    store.activity_by_employee.setdefault(employee_id, []).append(record)
+    logger.info(f"{employee_id} completed {payload.event_id}")
+
+    return await build_profile(employee_id)
+
+
+@app.get("/api/hr/overview", response_model=HROverviewOut)
+async def hr_overview() -> HROverviewOut:
+    return build_hr_overview()
+
+
+@app.post("/api/data/employees", response_model=UploadEmployeesResult)
+async def upload_employees(file: UploadFile = File(...)) -> UploadEmployeesResult:
+    raw = await file.read()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        merged = store.merge_employees(payload)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid employees payload: {exc}")
+    return UploadEmployeesResult(merged_employees=merged, total_employees=len(store.employees))
+
+
+@app.post("/api/data/activity", response_model=UploadActivityResult)
+async def upload_activity(file: UploadFile = File(...)) -> UploadActivityResult:
+    raw = await file.read()
+    try:
+        merged = store.merge_activity_csv_text(raw.decode("utf-8"))
+    except (csv.Error, ValidationError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid activity CSV: {exc}")
+    return UploadActivityResult(merged_records=merged, total_records=len(store.activity))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Static frontend
+# ──────────────────────────────────────────────────────────────────────────
+
+if STATIC_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR)), name="assets")
+
+
+@app.get("/")
+async def serve_index() -> FileResponse:
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="frontend not built yet")
+    return FileResponse(str(index_path))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Telegram bot (bonus channel — same engine, quick lookup by employee_id)
+# ──────────────────────────────────────────────────────────────────────────
+
+router = Router(name="main")
+
+
+def build_main_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📊 HR-обзор", callback_data="hr_overview")
+    builder.adjust(1)
+    return builder.as_markup()
+
 
 _MDV2_SPECIAL_CHARS = r"_*[]()~`>#+-=|{}.!"
 
@@ -352,145 +489,54 @@ def escape_markdown_v2(text: str) -> str:
     return "".join(result)
 
 
-def format_agent_reply(reply_text: str, tool_results: dict[str, str]) -> str:
-    parts = [escape_markdown_v2(reply_text)]
-    if tool_results:
-        parts.append("")
-        parts.append(escape_markdown_v2("— действия —"))
-        for name, result in tool_results.items():
-            parts.append(escape_markdown_v2(f"• {name}: {result}"))
-    return "\n".join(parts)
-
-
-def format_error(message: str) -> str:
-    return f"⚠️ {escape_markdown_v2(message)}"
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# FastAPI app
-# ──────────────────────────────────────────────────────────────────────────
-
-app = FastAPI(title="HackAlemAI Agent Backend", version="0.1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception(f"Unhandled error on {request.method} {request.url.path}")
-    return JSONResponse(status_code=500, content={"error": "internal_server_error", "detail": str(exc)})
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(
-        status="ok",
-        uptime_seconds=round(time.time() - START_TIME, 2),
-        active_sessions=session_store.count(),
-        telegram_configured=bool(BOT_TOKEN),
-        llm_configured=bool(LLM_API_KEY),
-        llm_provider=LLM_PROVIDER,
-        server_time=time.time(),
-    )
-
-
-@app.post("/api/agent/run", response_model=AgentRunResult)
-async def agent_run(payload: AgentRunRequest) -> AgentRunResult:
-    if not payload.user_input.strip():
-        raise HTTPException(status_code=400, detail="user_input must not be empty")
-    session_id = payload.session_id or f"api-{uuid.uuid4().hex[:12]}"
-    return await process_agent_turn(session_id, payload.user_input, payload.context)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Telegram bot (aiogram 3.x)
-# ──────────────────────────────────────────────────────────────────────────
-
-router = Router(name="main")
-
-CB_DASHBOARD = "dashboard"
-CB_NEW_TASK = "new_task"
-CB_SETTINGS = "settings"
-
-
-def build_main_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Состояние / Дашборд", callback_data=CB_DASHBOARD)
-    builder.button(text="➕ Новая задача", callback_data=CB_NEW_TASK)
-    builder.button(text="⚙️ Настройки / Контекст", callback_data=CB_SETTINGS)
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def telegram_session_id(user_id: int) -> str:
-    return f"tg-{user_id}"
-
-
 @router.message(CommandStart())
 async def handle_start(message: Message) -> None:
-    await session_store.get_or_create(telegram_session_id(message.from_user.id))
     text = (
-        "*Добро пожаловать\\!* 🤖\n\n"
-        "Я AI\\-агент этого проекта\\. Пишите мне что угодно текстом — я передам это "
-        "агенту и выполню нужные действия\\.\n\n"
-        "Выберите действие или просто напишите сообщение:"
+        "*Career Quest — AI\\-навигатор развития* 🎯\n\n"
+        "Отправьте ID сотрудника \\(например `E0028`\\), и я покажу траекторию "
+        "и рекомендованный следующий шаг\\."
     )
     await message.answer(text, reply_markup=build_main_keyboard())
 
 
-@router.callback_query(F.data == CB_DASHBOARD)
-async def handle_dashboard(callback: CallbackQuery) -> None:
-    session = await session_store.get_or_create(telegram_session_id(callback.from_user.id))
-    uptime = round(time.time() - START_TIME, 1)
-    text = (
-        f"*📊 Состояние системы*\n\n"
-        f"Аптайм backend: `{uptime}s`\n"
-        f"Активных сессий: `{session_store.count()}`\n"
-        f"Сообщений в вашей истории: `{len(session.history)}`\n"
-        f"LLM настроен: `{bool(LLM_API_KEY)}`"
-    )
-    await callback.message.answer(text)
-    await callback.answer()
-
-
-@router.callback_query(F.data == CB_NEW_TASK)
-async def handle_new_task(callback: CallbackQuery) -> None:
-    session_id = telegram_session_id(callback.from_user.id)
-    await session_store.clear(session_id)
-    await session_store.get_or_create(session_id)
-    await callback.message.answer("🆕 Контекст очищен\\. Опишите новую задачу одним сообщением\\.")
-    await callback.answer("Готово к новой задаче")
-
-
-@router.callback_query(F.data == CB_SETTINGS)
-async def handle_settings(callback: CallbackQuery) -> None:
-    session = await session_store.get_or_create(telegram_session_id(callback.from_user.id))
-    data_preview = escape_markdown_v2(json.dumps(session.data, ensure_ascii=False) or "{}")
-    await callback.message.answer(f"⚙️ *Текущий контекст сессии:*\n`{data_preview}`")
+@router.callback_query(F.data == "hr_overview")
+async def handle_hr_overview(callback) -> None:
+    overview = build_hr_overview()
+    lines = [f"*📊 HR\\-обзор* \\({overview.total_employees} сотрудников\\)", ""]
+    lines.append("*Проседающие навыки:*")
+    for g in overview.top_skill_gaps[:5]:
+        lines.append(escape_markdown_v2(f"• {g.name}: {g.employees_with_gap} чел., ср. разрыв {g.avg_gap}"))
+    await callback.message.answer("\n".join(lines))
     await callback.answer()
 
 
 @router.message(F.text)
 async def handle_text(message: Message) -> None:
-    user_input = message.text.strip()
-    if not user_input:
+    employee_id = message.text.strip().upper()
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    try:
+        profile = await build_profile(employee_id)
+    except HTTPException:
+        await message.answer(escape_markdown_v2(f"Сотрудник '{employee_id}' не найден. Введите ID вида E0028."))
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Telegram profile lookup failed")
+        await message.answer(escape_markdown_v2(f"Ошибка: {exc}"))
         return
 
-    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    session_id = telegram_session_id(message.from_user.id)
-
-    try:
-        result = await process_agent_turn(session_id, user_input, context={"source": "telegram"})
-        reply = format_agent_reply(result.reply_text, result.tool_results)
-        await message.answer(reply)
-    except Exception as exc:  # noqa: BLE001 - никогда не молчим и не роняем polling
-        logger.exception("Failed to process telegram message")
-        await message.answer(format_error(f"Не удалось обработать сообщение: {exc}"))
+    lines = [f"*{escape_markdown_v2(profile.full_name)}* — {escape_markdown_v2(profile.role + ' ' + profile.grade)}"]
+    if profile.trajectories:
+        t = profile.trajectories[0]
+        lines.append(escape_markdown_v2(f"Готовность к {t.role} {t.grade}: {t.readiness_pct}%"))
+    lines.append("")
+    if profile.recommendations:
+        lines.append("*Рекомендации:*")
+        for r in profile.recommendations:
+            lines.append(escape_markdown_v2(f"• {r.title}"))
+            lines.append(escape_markdown_v2(r.explanation))
+    else:
+        lines.append(escape_markdown_v2("Нет активных рекомендаций — либо всё выполнено, либо нет доступных активностей."))
+    await message.answer("\n".join(lines))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -521,18 +567,17 @@ async def run_telegram_bot() -> None:
 
 
 async def main() -> None:
-    logger.info("=== HackAlemAI Agent Backend booting ===")
-    logger.info(f"LLM Provider: {LLM_PROVIDER} | Model: {LLM_MODEL}")
+    logger.info("=== Career Quest backend booting ===")
     tasks = [run_api_server()]
     if BOT_TOKEN:
         tasks.append(run_telegram_bot())
     else:
-        logger.warning("Бот отключён: задайте BOT_TOKEN, чтобы включить Telegram-интерфейс")
+        logger.warning("Бот отключён (бонус): задайте BOT_TOKEN, чтобы включить Telegram-интерфейс")
 
     try:
         await asyncio.gather(*tasks)
     finally:
-        await llm_client.aclose()
+        await explainer.aclose()
 
 
 if __name__ == "__main__":

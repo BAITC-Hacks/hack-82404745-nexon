@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Career Quest — AI-навигатор развития</title>
+<link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🎯 Career Quest</div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="profile">Профиль сотрудника</button>
+    <button class="tab-btn" data-tab="hr">HR-обзор</button>
+    <button class="tab-btn" data-tab="upload">Загрузка профилей жюри</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-profile" class="tab-panel active">
+    <div class="profile-layout">
+      <aside class="employee-list-panel">
+        <input id="employee-search" type="text" placeholder="Поиск: ID, имя, роль..." />
+        <div id="employee-list" class="employee-list"></div>
+      </aside>
+
+      <div class="profile-main" id="profile-main">
+        <div class="empty-state">Выберите сотрудника слева</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-hr" class="tab-panel">
+    <div id="hr-content" class="hr-content">
+      <div class="empty-state">Загрузка...</div>
+    </div>
+  </section>
+
+  <section id="tab-upload" class="tab-panel">
+    <div class="upload-content">
+      <div class="upload-card">
+        <h3>Проверочные профили сотрудников (JSON)</h3>
+        <p class="hint">Формат как в employees.json: <code>{"employees":[...]}</code> или массив/объект профиля.</p>
+        <input type="file" id="file-employees" accept=".json" />
+        <button id="btn-upload-employees">Загрузить</button>
+        <div id="upload-employees-result" class="result-msg"></div>
+      </div>
+      <div class="upload-card">
+        <h3>История активностей (CSV)</h3>
+        <p class="hint">Формат как activity_history.csv.</p>
+        <input type="file" id="file-activity" accept=".csv" />
+        <button id="btn-upload-activity">Загрузить</button>
+        <div id="upload-activity-result" class="result-msg"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

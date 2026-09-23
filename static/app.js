@@ -1,4 +1,8 @@
 const API = "";
+const launchParams = new URLSearchParams(location.search);
+const launchEmployeeId = (launchParams.get("employee_id") || "").trim();
+const launchViewer = (launchParams.get("viewer") || "").trim();
+const isEmployeeLaunch = Boolean(launchEmployeeId && launchViewer);
 
 let allEmployees = [];
 let activeEmployeeId = null;
@@ -6,11 +10,17 @@ let showAILogic = false;
 let profileRequestId = 0;
 let profileChat = null;
 let hrChat = null;
-let viewerRole = "hr";
-let viewerEmployeeId = null;
+let viewerRole = isEmployeeLaunch ? "employee" : "hr";
+let viewerEmployeeId = isEmployeeLaunch ? launchEmployeeId : null;
+let viewerProfileName = "";
 let viewerGeneration = 0;
 const viewerRequests = new Set();
 const ACCESS_DENIED = "Доступ только к своим данным";
+let telegramApp = null;
+let telegramThemeActive = false;
+document.body.classList.toggle("mini-app", isEmployeeLaunch);
+document.body.dataset.viewerRole = viewerRole;
+document.querySelector(".mini-app-brand").hidden = !isEmployeeLaunch;
 
 function accessDeniedError() {
   const error = new Error(ACCESS_DENIED);
@@ -62,7 +72,7 @@ function navigateTo(tab, pushHistory = true) {
   if (!sections[tab]) return;
   if (viewerRole === "employee" && tab !== "profile") {
     tab = "profile";
-    history.replaceState(null, "", "#profile");
+    history.replaceState(null, "", `${location.pathname}${location.search}#profile`);
     flashUpdated(ACCESS_DENIED, "error");
   }
   document.querySelectorAll(".tab-btn").forEach((button) => {
@@ -76,7 +86,7 @@ function navigateTo(tab, pushHistory = true) {
   document.getElementById("page-eyebrow").textContent = sections[tab].eyebrow;
   document.getElementById("page-title").textContent = sections[tab].title;
   document.getElementById("page-description").textContent = sections[tab].description;
-  if (pushHistory && location.hash !== `#${tab}`) history.pushState(null, "", `#${tab}`);
+  if (pushHistory && location.hash !== `#${tab}`) history.pushState(null, "", `${location.pathname}${location.search}#${tab}`);
   closeSidebar();
   if (tab === "hr") loadHR();
   syncAgentChatDock(tab);
@@ -98,18 +108,77 @@ document.addEventListener("keydown", (event) => {
 });
 
 const themeButton = document.getElementById("theme-toggle");
-function setTheme(theme) {
+function setTheme(theme, persist = true) {
   document.documentElement.dataset.theme = theme;
   const dark = theme === "dark";
   themeButton.querySelector(".theme-label").textContent = dark ? "Светлая тема" : "Тёмная тема";
   themeButton.setAttribute("aria-label", dark ? "Включить светлую тему" : "Включить тёмную тему");
   document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#111827" : "#f5f7fb");
-  try { localStorage.setItem("careerQuestTheme", theme); } catch { /* storage may be disabled */ }
+  if (persist) {
+    try { localStorage.setItem("careerQuestTheme", theme); } catch { /* storage may be disabled */ }
+  }
 }
 let savedTheme = "light";
 try { savedTheme = localStorage.getItem("careerQuestTheme") === "dark" ? "dark" : "light"; } catch { /* use light */ }
 setTheme(savedTheme);
 themeButton.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+
+// The SDK loads independently, so a slow/unavailable Telegram host never blocks the profile.
+function initializeTelegram() {
+  const app = window.Telegram?.WebApp;
+  if (!app || app === telegramApp) return;
+  telegramApp = app;
+  // Telegram also exposes WebApp in a standalone browser (platform="unknown").
+  telegramThemeActive = isEmployeeLaunch || Boolean(app.initData) || app.platform !== "unknown";
+  if (telegramThemeActive) {
+    document.body.classList.add("telegram-app");
+    const syncTheme = () => {
+      setTheme(app.colorScheme === "dark" ? "dark" : "light", false);
+      try { app.setHeaderColor?.("bg_color"); } catch { /* older Telegram client */ }
+      try { app.setBackgroundColor?.(getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()); } catch { /* older Telegram client */ }
+    };
+    syncTheme();
+    app.onEvent?.("themeChanged", syncTheme);
+    ["viewportChanged", "safeAreaChanged", "contentSafeAreaChanged"].forEach((event) => app.onEvent?.(event, scheduleMiniViewport));
+    app.BackButton?.onClick?.(() => {
+      profileChat?.close();
+      hrChat?.close();
+    });
+  }
+  try { app.ready?.(); } catch { /* website still works without the native bridge */ }
+  try { app.expand?.(); } catch { /* website still works without the native bridge */ }
+  scheduleMiniViewport();
+  syncTelegramBackButton();
+}
+
+let miniViewportFrame = null;
+function scheduleMiniViewport() {
+  if (!isEmployeeLaunch || miniViewportFrame !== null) return;
+  miniViewportFrame = requestAnimationFrame(() => {
+    miniViewportFrame = null;
+    const viewport = window.visualViewport;
+    const visualHeight = viewport?.height || window.innerHeight;
+    const nativeHeight = Number(telegramApp?.viewportHeight) || visualHeight;
+    const height = Math.max(1, Math.min(visualHeight, nativeHeight));
+    const offset = Math.max(0, window.innerHeight - height - (viewport?.offsetTop || 0));
+    document.body.classList.toggle("mini-compact-chat", height < 440);
+    const style = document.documentElement.style;
+    style.setProperty("--mini-viewport-height", `${Math.round(height)}px`);
+    style.setProperty("--mini-keyboard-offset", `${Math.round(offset)}px`);
+    for (const side of ["top", "right", "bottom", "left"]) {
+      const device = Math.max(0, Number(telegramApp?.safeAreaInset?.[side]) || 0);
+      const content = Math.max(0, Number(telegramApp?.contentSafeAreaInset?.[side]) || 0);
+      style.setProperty(`--mini-safe-${side}`, `max(env(safe-area-inset-${side}, 0px), ${device + content}px)`);
+    }
+  });
+}
+
+function syncTelegramBackButton() {
+  if (!telegramThemeActive) return;
+  const open = document.querySelector('#agent-chat-dock:not([hidden]) .agent-chat:not([hidden]) .agent-chat-toggle[aria-expanded="true"]');
+  if (open) telegramApp?.BackButton?.show?.();
+  else telegramApp?.BackButton?.hide?.();
+}
 
 // ── Demo viewer role ─────────────────────────────────────────────────
 
@@ -121,7 +190,7 @@ const viewerHrButton = document.getElementById("viewer-hr");
 function updateViewerControls() {
   const isEmployee = viewerRole === "employee";
   document.body.dataset.viewerRole = viewerRole;
-  viewerEmployeeButton.disabled = !allEmployees.length;
+  viewerEmployeeButton.disabled = !allEmployees.length && !viewerEmployeeId;
   viewerEmployeeButton.setAttribute("aria-pressed", String(isEmployee));
   viewerHrButton.setAttribute("aria-pressed", String(!isEmployee));
   document.querySelectorAll('.tab-btn[data-tab="hr"], .tab-btn[data-tab="upload"]').forEach((button) => {
@@ -132,13 +201,15 @@ function updateViewerControls() {
   identity.hidden = !isEmployee;
   if (isEmployee) {
     const me = allEmployees.find((e) => e.employee_id === viewerEmployeeId);
-    identity.textContent = `Вы: ${me?.full_name || viewerEmployeeId} (${viewerEmployeeId}) · доступен только свой профиль`;
+    const name = me?.full_name || viewerProfileName;
+    identity.textContent = `Вы: ${name ? `${name} · ` : ""}${viewerEmployeeId} · доступен только свой профиль`;
   }
   closeSidebar();
   closeEmployeePicker();
 }
 
 function setViewerRole(role) {
+  if (isEmployeeLaunch) return;
   if (role !== "hr" && role !== "employee") return;
   if (role === viewerRole || (role === "employee" && !allEmployees.some((e) => e.employee_id === viewerEmployeeId))) return;
   const nextEmployeeId = role === "employee" ? viewerEmployeeId : activeEmployeeId;
@@ -272,7 +343,10 @@ async function selectEmployee(employeeId) {
       <span class="loading-caption">Считаем траекторию и рекомендации...</span>
     </div>`;
   try {
-    const res = await apiFetch(`/api/employees/${employeeId}`);
+    const res = await apiFetch(`/api/employees/${encodeURIComponent(employeeId)}`);
+    if (res.status === 404) throw new Error(isEmployeeLaunch
+      ? "Профиль не найден. Проверьте ссылку или откройте приложение заново из бота."
+      : "Сотрудник не найден. Обновите страницу и выберите профиль заново.");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const profile = await res.json();
     if (requestId !== profileRequestId) return;
@@ -282,10 +356,24 @@ async function selectEmployee(employeeId) {
     if (requestId !== profileRequestId) return;
     const message = err.status === 403 ? ACCESS_DENIED : `Ошибка загрузки профиля: ${err.message || String(err)}`;
     main.innerHTML = `<div class="empty-state" role="alert">${escapeHtml(message)}</div>`;
+    if (isEmployeeLaunch && err.status !== 403) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn btn-outline";
+      retry.textContent = "Попробовать снова";
+      retry.addEventListener("click", () => selectEmployee(employeeId));
+      main.appendChild(retry);
+    }
   }
 }
 
 function renderProfile(p) {
+  if (viewerRole === "employee") {
+    viewerProfileName = p.full_name;
+    updateViewerControls();
+  }
+  if (profileChat?.employeeId === p.employee_id) profileChat.setEmployeeName(p.full_name);
+  document.getElementById("selected-employee-label").textContent = p.full_name;
   const main = document.getElementById("profile-main");
   main.innerHTML = "";
 
@@ -478,7 +566,7 @@ async function completeActivity(employeeId, eventId, buttonEl) {
   buttonEl.textContent = "Обновляем...";
   card?.classList.add("rec-card-completing");
   try {
-    const res = await apiFetch(`/api/employees/${employeeId}/complete`, {
+    const res = await apiFetch(`/api/employees/${encodeURIComponent(employeeId)}/complete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ event_id: eventId }),
@@ -653,7 +741,7 @@ function renderHR(d) {
 function createAgentChat(mode, employeeId, employeeName = "") {
   const isHR = mode === "hr";
   const prefix = `agent-${mode}`;
-  const context = isHR ? "HR-режим · вся компания" : `Для сотрудника: ${employeeName}`;
+  let context = isHR ? "HR-режим · вся компания" : `Для сотрудника: ${employeeName || employeeId}`;
   // Only user/assistant text goes back to the API; tool traces stay in the UI.
   const messages = [];
   let pending = false;
@@ -736,13 +824,23 @@ function createAgentChat(mode, employeeId, employeeName = "") {
     return text;
   }
 
-  toggle.addEventListener("click", () => {
-    const open = body.hidden;
+  function setOpen(open, restoreFocus = false) {
     body.hidden = !open;
     toggle.setAttribute("aria-expanded", String(open));
+    syncTelegramBackButton();
     if (open) {
       input.focus({ preventScroll: true });
       scrollToLatest();
+    } else {
+      input.blur();
+      if (restoreFocus) toggle.focus({ preventScroll: true });
+    }
+  }
+  toggle.addEventListener("click", () => setOpen(body.hidden));
+  element.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !body.hidden) {
+      event.preventDefault();
+      setOpen(false, true);
     }
   });
   input.addEventListener("input", updateControls);
@@ -822,11 +920,18 @@ function createAgentChat(mode, employeeId, employeeName = "") {
   return {
     element,
     employeeId,
+    close() { setOpen(false); },
+    setEmployeeName(name) {
+      if (isHR) return;
+      context = `Для сотрудника: ${name || employeeId}`;
+      if (!pending) contextLabel.textContent = context;
+    },
     dispose() {
       disposed = true;
       controller?.abort();
       messages.length = 0;
       element.remove();
+      syncTelegramBackButton();
     },
   };
 }
@@ -867,9 +972,11 @@ function syncAgentChatDock(tab) {
   });
   if (!chat) {
     dock.hidden = true;
+    syncTelegramBackButton();
     return;
   }
   dock.hidden = false;
+  syncTelegramBackButton();
 }
 
 // ── Upload ───────────────────────────────────────────────────────────
@@ -1041,11 +1148,26 @@ function escapeHtml(str) {
 
 // ── Init ─────────────────────────────────────────────────────────────
 
-hrChat = createAgentChat("hr", null);
+hrChat = isEmployeeLaunch ? null : createAgentChat("hr", null);
 updateViewerControls();
-navigateTo(location.hash.slice(1) in sections ? location.hash.slice(1) : "profile", false);
-loadEmployees().catch((err) => {
-  if (viewerRole !== "hr") return;
-  const list = document.getElementById("employee-list");
-  list.innerHTML = `<div class="people-empty" role="alert">${escapeHtml(err.status === 403 ? ACCESS_DENIED : `Не удалось загрузить список сотрудников: ${err.message || String(err)}`)}</div>`;
-});
+const initialTab = location.hash.slice(1);
+if (isEmployeeLaunch && (initialTab === "hr" || initialTab === "upload")) {
+  history.replaceState(null, "", `${location.pathname}${location.search}#profile`);
+}
+navigateTo(!isEmployeeLaunch && initialTab in sections ? initialTab : "profile", false);
+document.getElementById("telegram-web-app-sdk").addEventListener("load", initializeTelegram);
+initializeTelegram();
+if (isEmployeeLaunch) {
+  window.addEventListener("resize", scheduleMiniViewport);
+  window.visualViewport?.addEventListener("resize", scheduleMiniViewport);
+  window.visualViewport?.addEventListener("scroll", scheduleMiniViewport);
+  scheduleMiniViewport();
+  // Fetch the requested profile directly: a Mini App never needs the colleague directory.
+  selectEmployee(viewerEmployeeId);
+} else {
+  loadEmployees().catch((err) => {
+    if (viewerRole !== "hr") return;
+    const list = document.getElementById("employee-list");
+    list.innerHTML = `<div class="people-empty" role="alert">${escapeHtml(err.status === 403 ? ACCESS_DENIED : `Не удалось загрузить список сотрудников: ${err.message || String(err)}`)}</div>`;
+  });
+}

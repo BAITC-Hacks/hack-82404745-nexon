@@ -7,12 +7,9 @@ FastAPI backend + static web frontend + optional Telegram bot (bonus).
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import json
 import os
 import time
-from datetime import date
 from pathlib import Path
 
 import uvicorn
@@ -22,7 +19,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -485,7 +481,9 @@ async def upload_employees(file: UploadFile = File(...), viewer: Viewer = Depend
     try:
         payload = json.loads(raw.decode("utf-8"))
         merged = store.merge_employees(payload)
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}")
+    except Exception as exc:  # noqa: BLE001 - untrusted input boundary: never 500 on a malformed jury file
         raise HTTPException(status_code=400, detail=f"invalid employees payload: {exc}")
     return UploadEmployeesResult(merged_employees=merged, total_employees=len(store.employees))
 
@@ -496,7 +494,7 @@ async def upload_activity(file: UploadFile = File(...), viewer: Viewer = Depends
     raw = await file.read()
     try:
         merged = store.merge_activity_csv_text(raw.decode("utf-8"))
-    except (csv.Error, ValidationError, KeyError) as exc:
+    except Exception as exc:  # noqa: BLE001 - untrusted input boundary: never 500 on a malformed jury file
         raise HTTPException(status_code=400, detail=f"invalid activity CSV: {exc}")
     return UploadActivityResult(merged_records=merged, total_records=len(store.activity))
 

@@ -83,8 +83,14 @@ class DataStore:
 
     # ── jury upload merge ───────────────────────────────────────────
 
-    def merge_employees(self, employees_payload: dict[str, Any]) -> int:
-        records = employees_payload.get("employees", employees_payload)
+    def merge_employees(self, employees_payload: dict[str, Any] | list[dict[str, Any]]) -> int:
+        # Accept every shape the case brief or a naive checker script might send:
+        # {"employees": [...]}, {"employees": {...}}, a single bare profile (the
+        # literal example in the brief), or a bare top-level list of profiles.
+        if isinstance(employees_payload, list):
+            records: Any = employees_payload
+        else:
+            records = employees_payload.get("employees", employees_payload)
         if isinstance(records, dict):
             records = [records]
         count = 0

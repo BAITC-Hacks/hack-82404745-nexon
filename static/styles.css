@@ -409,6 +409,107 @@ body.show-ai-logic .rec-explanation { display: none; }
   .agent-message { max-width: 100%; padding: 10px 12px; }
   .agent-message-user { max-width: 92%; }
 }
+/* Telegram Mini App: a focused personal workspace, including direct demo links. */
+.mini-app-brand[hidden] { display: none !important; }
+body.mini-app {
+  --mini-chat-limit: min(680px, max(180px, calc(var(--mini-viewport-height, 100dvh) - 28px - var(--mini-safe-top, env(safe-area-inset-top, 0px)) - var(--mini-safe-bottom, env(safe-area-inset-bottom, 0px)))));
+  background: radial-gradient(ellipse at 50% 0, var(--accent-soft), transparent 620px), var(--bg);
+  overflow-wrap: anywhere;
+  -webkit-tap-highlight-color: transparent;
+}
+body.mini-app .app-shell { display: block; min-height: var(--mini-viewport-height, 100dvh); }
+body.mini-app .app-sidebar,
+body.mini-app .sidebar-backdrop,
+body.mini-app .menu-toggle,
+body.mini-app .people-column,
+body.mini-app .mobile-bottom-nav,
+body.mini-app .viewer-role-switch,
+body.mini-app .topbar-context { display: none !important; }
+body.telegram-app .theme-toggle { display: none !important; }
+body.mini-app .workspace-topbar {
+  height: auto;
+  min-height: calc(76px + var(--mini-safe-top, env(safe-area-inset-top, 0px)));
+  padding: calc(12px + var(--mini-safe-top, env(safe-area-inset-top, 0px))) max(24px, var(--mini-safe-right, env(safe-area-inset-right, 0px))) 12px max(24px, var(--mini-safe-left, env(safe-area-inset-left, 0px)));
+  background: color-mix(in srgb, var(--panel) 95%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+body.mini-app .mini-app-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+body.mini-app .mini-app-mark { display: grid; place-items: center; flex: 0 0 42px; height: 42px; border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); border-radius: 13px; background: linear-gradient(140deg, var(--accent-soft), var(--panel)); color: var(--accent); font-size: 14px; font-weight: 800; letter-spacing: -.06em; box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 9%, transparent); }
+body.mini-app .mini-app-brand > span:last-child { display: grid; min-width: 0; gap: 2px; }
+body.mini-app .mini-app-brand strong { font-size: 16px; line-height: 1.2; letter-spacing: -.03em; }
+body.mini-app .mini-app-brand small { color: var(--text-dim); font-size: 11px; }
+body.mini-app .topbar-actions { flex: none; }
+body.mini-app .theme-toggle { min-width: 44px; min-height: 44px; }
+body.mini-app main {
+  max-width: 1040px;
+  padding: 30px max(24px, var(--mini-safe-right, env(safe-area-inset-right, 0px))) calc(116px + var(--mini-safe-bottom, env(safe-area-inset-bottom, 0px))) max(24px, var(--mini-safe-left, env(safe-area-inset-left, 0px)));
+}
+body.mini-app .page-intro { margin-bottom: 22px; }
+body.mini-app .page-intro h1 { margin-top: 8px; font-size: clamp(28px, 4vw, 36px); }
+body.mini-app .page-intro p { max-width: 56ch; line-height: 1.6; }
+body.mini-app .viewer-identity { border-color: color-mix(in srgb, var(--accent) 20%, var(--border)); background: var(--accent-soft); }
+body.mini-app .profile-layout { grid-template-columns: minmax(0, 1fr); }
+body.mini-app .profile-main { gap: 20px; }
+body.mini-app .card { border-radius: 20px; }
+body.mini-app .profile-header { position: relative; isolation: isolate; overflow: hidden; padding: 26px; }
+body.mini-app .profile-header::before { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(110deg, transparent 25%, #ffffff0c 45%, #ffffff16 50%, transparent 70%); transform: translateX(-100%); pointer-events: none; animation: mini-header-sheen 1.7s .2s ease-out both; }
+body.mini-app .profile-target { min-width: 0; }
+body.mini-app .section-heading { gap: 12px; }
+body.mini-app .skill-bar-row { min-height: 33px; }
+body.mini-app .rec-card { padding: 18px; border-radius: 14px; }
+body.mini-app .rec-title { line-height: 1.4; }
+body.mini-app .rec-explanation { line-height: 1.65; }
+body.mini-app .btn, body.mini-app .agent-tool-trace summary { min-height: 44px; }
+body.mini-app .btn:active:not(:disabled) { transform: scale(.98); }
+body.mini-app .agent-chat-dock {
+  right: max(16px, var(--mini-safe-right, env(safe-area-inset-right, 0px)));
+  bottom: calc(14px + var(--mini-keyboard-offset, 0px) + var(--mini-safe-bottom, env(safe-area-inset-bottom, 0px)));
+  width: min(420px, calc(100vw - 32px - var(--mini-safe-left, env(safe-area-inset-left, 0px)) - var(--mini-safe-right, env(safe-area-inset-right, 0px))));
+  max-height: var(--mini-chat-limit);
+}
+body.mini-app .card.agent-chat { display: flex; flex-direction: column; max-height: var(--mini-chat-limit); padding: 0; border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); box-shadow: 0 12px 40px color-mix(in srgb, var(--text) 15%, transparent); }
+body.mini-app .agent-chat-toggle { flex: none; min-height: 64px; }
+body.mini-app .agent-chat-body { display: flex; flex-direction: column; min-height: 0; max-height: calc(var(--mini-chat-limit) - 64px); padding: 14px; overflow-y: auto; }
+body.mini-app .agent-chat-body[hidden] { display: none; }
+body.mini-app .agent-chat-log { flex: 1 1 auto; min-height: 44px; max-height: max(44px, min(380px, calc(var(--mini-viewport-height, 100dvh) - 270px))); scrollbar-gutter: stable; }
+body.mini-app .agent-chat-form, body.mini-app .agent-chat-typing, body.mini-app .agent-chat-error { flex: none; }
+body.mini-app .agent-chat-compose { flex-direction: row; align-items: flex-end; gap: 8px; }
+body.mini-app .agent-chat-input { min-height: 62px; max-height: 110px; resize: none; font-size: 16px; }
+body.mini-app .agent-chat-send { width: auto; min-height: 46px; padding: 10px 11px; }
+body.mini-app .agent-message-text { line-height: 1.65; }
+body.mini-app .toast { bottom: calc(98px + var(--mini-keyboard-offset, 0px) + var(--mini-safe-bottom, env(safe-area-inset-bottom, 0px))); max-width: calc(100vw - 32px); width: max-content; border-radius: 12px; text-align: center; }
+@keyframes mini-header-sheen { to { transform: translateX(100%); } }
+@media (min-width: 1100px) {
+  body.mini-app .workspace-topbar { padding-left: max(calc((100vw - 992px) / 2), var(--mini-safe-left, env(safe-area-inset-left, 0px))); padding-right: max(calc((100vw - 992px) / 2), var(--mini-safe-right, env(safe-area-inset-right, 0px))); }
+}
+@media (max-width: 520px) {
+  body.mini-app .workspace-topbar { min-height: calc(68px + var(--mini-safe-top, env(safe-area-inset-top, 0px))); padding: calc(10px + var(--mini-safe-top, env(safe-area-inset-top, 0px))) max(16px, var(--mini-safe-right, env(safe-area-inset-right, 0px))) 10px max(16px, var(--mini-safe-left, env(safe-area-inset-left, 0px))); }
+  body.mini-app .mini-app-mark { flex-basis: 38px; height: 38px; border-radius: 12px; }
+  body.mini-app .mini-app-brand small { font-size: 10px; }
+  body.mini-app main { padding-top: 22px; padding-right: max(14px, var(--mini-safe-right, env(safe-area-inset-right, 0px))); padding-left: max(14px, var(--mini-safe-left, env(safe-area-inset-left, 0px))); }
+  body.mini-app .page-intro h1 { font-size: 29px; }
+  body.mini-app .card { padding: 18px; border-radius: 17px; }
+  body.mini-app .profile-header { padding: 22px 20px; gap: 18px; }
+  body.mini-app .profile-header .name { font-size: 27px; }
+  body.mini-app .profile-badges { margin-top: 15px; }
+  body.mini-app .profile-target { padding: 13px; }
+  body.mini-app .profile-target strong { font-size: 20px; }
+  body.mini-app .rec-card { padding: 15px; }
+  body.mini-app .complete-btn { width: 100%; }
+  body.mini-app .agent-chat-hint { display: none; }
+  body.mini-app .agent-chat-toggle { padding: 11px 13px; }
+  body.mini-app .agent-chat-body { padding: 12px; }
+}
+/* Preserve the composer when the keyboard leaves very little vertical space. */
+body.mini-app.mini-compact-chat .agent-chat-toggle { min-height: 56px; padding: 8px 12px; }
+body.mini-app.mini-compact-chat .agent-chat-context,
+body.mini-app.mini-compact-chat .agent-chat-hint { display: none; }
+body.mini-app.mini-compact-chat .agent-chat-body { max-height: calc(var(--mini-chat-limit) - 56px); padding: 8px; }
+body.mini-app.mini-compact-chat .agent-chat-log { min-height: 0; padding: 0 3px 6px; }
+body.mini-app.mini-compact-chat .agent-chat-input { height: 46px; min-height: 46px; padding: 10px; }
+body.mini-app.mini-compact-chat .agent-chat-typing { margin-bottom: 4px; }
+body.mini-app.mini-compact-chat .agent-chat-error { max-height: 42px; margin-bottom: 4px; padding: 4px 8px; overflow-y: auto; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
